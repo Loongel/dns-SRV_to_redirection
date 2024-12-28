@@ -2,12 +2,13 @@
  * Cloudflare Worker - SRV 跳转 + 资源汇总门户 + 泛域名扫描（升级版）
  *
  * 环境变量:
- *   1) DOMAINS       =>  逗号分隔的域名列表, 允许通配符: "*.nat.example.com,d1.example.com"
- *   2) PORTAL_DOMAIN =>  门户域名(若为空, 取DOMAINS中的第一个通配符的顶层域)
- *   3) CF_API_TOKEN  =>  用于调用Cloudflare API的Token（可为空，若为空则不主动扫描所有SRV）
- *   4) CF_ZONE_ID    =>  用于调用Cloudflare API的Zone ID（同上，如为空则不主动扫描SRV）
- *   5) PORTAL_PASSWD =>  门户页面密码（若为空则默认11111111）
- *   6) DEBUG_MODE    =>  是否启用调试模式 (默认 false, 设置为 true 显示详细调试信息)
+ *   1) DOMAINS             =>  逗号分隔的域名列表, 允许通配符: "*.nat.example.com,d1.example.com"
+ *   2) PORTAL_DOMAIN       =>  门户域名(若为空, 取DOMAINS中的第一个通配符的顶层域)
+ *   3) CF_API_TOKEN        =>  用于调用Cloudflare API的Token（可为空，若为空则不主动扫描所有SRV）
+ *   4) CF_ZONE_ID          =>  用于调用Cloudflare API的Zone ID（同上，如为空则不主动扫描SRV）
+ *   5) PORTAL_PASSWD       =>  门户页面密码（若为空则默认11111111）
+ *   6) DEBUG_MODE          =>  是否启用调试模式 (默认 false, 设置为 true 显示详细调试信息)
+ *   7) DEFAULT_REDIRECT_STATUS => 所有域名的默认跳转方式，可选301/302/307/308，默认为302
  */
 
 export default {
@@ -73,6 +74,7 @@ export default {
     // 若 portalDomain 未手动设置, 则自动从 domainList 中获取第一个通配符, 去掉 '*.' 部分
     let portalDomain = (env.PORTAL_DOMAIN || "").trim();
     if (!portalDomain) {
+      // 若未手动设置, 从domainList中找第一个含'*.'的,去除前缀
       const foundWildcard = domainList.find((d) => d.includes("*."));
       if (foundWildcard) {
         portalDomain = foundWildcard.replace("*.", "");
@@ -86,21 +88,28 @@ export default {
     const portalPasswd = (env.PORTAL_PASSWD || "11111111").trim();
     const debugMode = env.DEBUG_MODE === "true";
   
-    // 返回配置对象
-    const config = {
-      domainList,                           // 受管控的域名(含通配符)
-      portalDomain,                         // 门户域名
-      cfApiToken: env.CF_API_TOKEN || "",   // Cloudflare API Token（可能为空）
-      cfZoneId: env.CF_ZONE_ID || "",       // Cloudflare Zone ID（可能为空）
-      cacheTtl: 300,                        // 缓存多少秒后重新调用API
-      portalPasswd,                         // 门户访问密码
-      debugMode,                            // 调试模式
-    };
-  
-    if (debugMode) {
-      console.log("[DEBUG] [initConfig] 解析得到的配置信息: ", JSON.stringify(config, null, 2));
+    // === 新增/修改 ===
+    // 读取默认跳转方式，若非法/未设置则默认302
+    let parsedStatus = parseInt(env.DEFAULT_REDIRECT_STATUS, 10);
+    if (isNaN(parsedStatus) || ![301, 302, 307, 308].includes(parsedStatus)) {
+      parsedStatus = 302;
     }
-    return config;
+  
+    // 额外新增一个 customRedirectModes 用于存储用户在门户页面对特定域名/服务的自定义跳转值
+    if (!globalThis.customRedirectModes) {
+      globalThis.customRedirectModes = {};
+    }
+  
+    return {
+      domainList,
+      portalDomain,
+      cfApiToken: env.CF_API_TOKEN || "",
+      cfZoneId: env.CF_ZONE_ID || "",
+      cacheTtl: 300,
+      portalPasswd,
+      debugMode,
+      defaultRedirectStatus: parsedStatus, // === 新增字段 ===
+    };
   }
   
   /**
@@ -126,21 +135,16 @@ export default {
     const cacheAge = now - globalThis.srvRecordsCache.fetchedAt;
     if (cacheAge > config.cacheTtl) {
       if (config.debugMode) {
-        console.log("[DEBUG] [ensureSrvRecordsCache] 缓存过期或为空, 开始调用 fetchAllSrvRecords...");
+        console.log("[DEBUG] [ensureSrvRecordsCache] 缓存过期, 开始调用 fetchAllSrvRecords...");
       }
       const records = await fetchAllSrvRecords(config.cfApiToken, config.cfZoneId, config.debugMode);
       if (records && records.length > 0) {
         globalThis.srvRecordsCache.data = records;
         globalThis.srvRecordsCache.fetchedAt = now;
-        if (config.debugMode) {
-          console.log("[DEBUG] [ensureSrvRecordsCache] 成功获取 SRV 记录数=", records.length);
-        }
-      } else {
-        console.warn("从 Cloudflare API 未获取到任何 SRV 记录，保持使用旧缓存。");
       }
     } else {
       if (config.debugMode) {
-        console.log(`[DEBUG] [ensureSrvRecordsCache] 缓存还未过期, 剩余 ${config.cacheTtl - cacheAge} 秒`);
+        console.log("[DEBUG] [ensureSrvRecordsCache] 缓存未过期,无需更新");
       }
     }
   }
@@ -154,7 +158,7 @@ export default {
    */
   async function fetchAllSrvRecords(cfApiToken, zoneId, debugMode) {
     if (!cfApiToken || !zoneId) {
-      console.warn("缺少 CF_API_TOKEN 或 CF_ZONE_ID，跳过自动扫描SRV。");
+      console.warn("[WARN] 缺少 CF_API_TOKEN 或 CF_ZONE_ID，跳过自动扫描SRV。");
       return [];
     }
   
@@ -162,11 +166,10 @@ export default {
     let allRecords = [];
     let page = 1;
   
-    // 简易分页循环
     while (true) {
       const pageUrl = `${url}&page=${page}`;
       if (debugMode) {
-        console.log("[DEBUG] [fetchAllSrvRecords] 即将请求:", pageUrl);
+        console.log("[DEBUG] [fetchAllSrvRecords] 请求地址=", pageUrl);
       }
   
       const resp = await fetch(pageUrl, {
@@ -176,23 +179,18 @@ export default {
           "Content-Type": "application/json",
         },
       });
-  
       if (!resp.ok) {
-        const txt = await resp.text();
-        console.error("调用 Cloudflare API 失败:", resp.status, txt);
+        console.error("[ERROR] Cloudflare API 失败:", resp.status, await resp.text());
         break;
       }
       const json = await resp.json();
       if (!json.success) {
-        console.error("Cloudflare API 返回失败:", json.errors);
+        console.error("[ERROR] Cloudflare API返回不成功:", json.errors);
         break;
       }
+  
       const result = json.result || [];
       allRecords = allRecords.concat(result);
-  
-      if (debugMode) {
-        console.log(`[DEBUG] [fetchAllSrvRecords] 第 ${page} 页获取到 SRV 记录数=`, result.length);
-      }
   
       if (json.result_info.page >= json.result_info.total_pages) {
         break;
@@ -203,211 +201,250 @@ export default {
     // 解析SRV记录：额外通过 parseSrvName(r.name) 获取 service/protocol/hostname
     const parsed = allRecords.map((r) => {
       const { service, protocol, hostname } = parseSrvName(r.name);
-  
       return {
-        // 将记录中的 key 全部汇总到这里
         id: r.id,
-        zone_id: r.zone_id,
-        zone_name: r.zone_name,
-        originalName: r.name, // 记录未拆分前的原始 name
-        // 解析得到
+        originalName: r.name,
         service,
         protocol,
-        hostname, // dav.nat.example.com
+        hostname,
+        port: r.data?.port || 0,
         priority: r.data?.priority || 0,
         weight: r.data?.weight || 0,
-        port: r.data?.port || 0,
-        target: (r.data?.target || "").replace(/\.$/, ""), // 移除末尾点
-        content: r.content || "",
-        raw: r  // 原始记录（调试用）
+        target: (r.data?.target || "").replace(/\.$/, ""),
+        raw: r,
       };
     });
-  
-    if (debugMode) {
-      console.log("[DEBUG] [fetchAllSrvRecords] 完成全部分页获取, 最终SRV记录总数=", parsed.length);
-    }
     return parsed;
   }
   
   /**
-   * 解析 SRV 记录名，例如 "_http._tls.dav.nat.example.com"
-   * 返回 { service, protocol, hostname }
+   * 将 _http._tls.dav.nat.example.com 解析为 { service:'_http', protocol:'_tls', hostname:'dav.nat.example.com' }
    */
   function parseSrvName(name) {
-    // 按 '.' 分割
     const parts = name.split(".");
-    // 一般格式: [0]=_http, [1]=_tls, 剩下部分拼回真正的域名
     if (parts.length < 2) {
       return { service: "", protocol: "", hostname: name };
     }
-    const service = parts[0];     // _http
-    const protocol = parts[1];    // _tls / _tcp / _udp ...
-    const hostname = parts.slice(2).join("."); // dav.nat.example.com
+    const service = parts[0]; // _http
+    const protocol = parts[1]; // _tls / _tcp...
+    const hostname = parts.slice(2).join(".");
     return { service, protocol, hostname };
   }
   
   /**
-   * Step D: 门户页面 + 简易密码校验
+   * Step D: 门户页面
    */
   async function handlePortalPageWithAuth(request, env, config) {
-    const url = new URL(request.url);
-    const userPwd = url.searchParams.get("pwd") || "";
+    // 1) 检查密码
+    let userPwd = "";
+    let domainToUpdate = "";
+    let newRedirectStatus = "";
   
-    // 密码不正确直接返回 401
+    if (request.method === "POST") {
+      // 读取 formData
+      const formData = await request.formData();
+      userPwd = formData.get("pwd") || "";
+      // === 新增/修改 ===
+      // 若传入 domain & redirectStatus，则表示用户想修改某条域名的跳转方式
+      domainToUpdate = formData.get("domain") || "";
+      newRedirectStatus = formData.get("redirectStatus") || "";
+    } else {
+      // GET请求也可兼容
+      const url = new URL(request.url);
+      userPwd = url.searchParams.get("pwd") || "";
+    }
+  
+    // 如果没输入/或错误，就弹出密码输入表单
     if (userPwd !== config.portalPasswd) {
-      if (config.debugMode) {
-        console.warn("[DEBUG] [handlePortalPageWithAuth] 密码错误或未提供, userPwd=", userPwd);
+      return buildPasswordForm(config.debugMode);
+    }
+  
+    // === 新增/修改 ===
+    // 如果传入了 domainToUpdate & newRedirectStatus，则更新 globalThis.customRedirectModes
+    if (domainToUpdate && newRedirectStatus) {
+      const parsedStatus = parseInt(newRedirectStatus, 10);
+      if (![301, 302, 307, 308].includes(parsedStatus)) {
+        // 若非法，则忽略
+        if (config.debugMode) {
+          console.log("[DEBUG] [handlePortalPageWithAuth] 非法的跳转状态:", newRedirectStatus);
+        }
+      } else {
+        globalThis.customRedirectModes[domainToUpdate] = parsedStatus;
+        if (config.debugMode) {
+          console.log(
+            `[DEBUG] [handlePortalPageWithAuth] 已更新 ${domainToUpdate} 的跳转状态为 ${parsedStatus}`
+          );
+        }
       }
-      return new Response("未授权：密码错误或未提供。请在URL中使用 ?pwd=xxx", {
-        status: 401,
-        headers: { "Content-Type": "text/plain; charset=UTF-8" },
-      });
     }
   
-    // 收集 SRV 记录
+    // 2) 查询 SRV
     const allSrvRecords = globalThis.srvRecordsCache?.data || [];
-    if (config.debugMode) {
-      console.log("[DEBUG] [handlePortalPageWithAuth] 命中 SRV 缓存记录数=", allSrvRecords.length);
-    }
-  
-    // 筛选只属于 config.domainList 中的记录
     const matchedRecords = allSrvRecords.filter((rec) =>
       config.domainList.some((pattern) => {
         const regex = wildcardToRegex(pattern);
-        // 用 rec.hostname 做匹配
         return regex.test(rec.hostname);
       })
     );
   
-    if (config.debugMode) {
-      console.log("[DEBUG] [handlePortalPageWithAuth] 筛选后记录数=", matchedRecords.length);
-    }
-  
-    // 转换为资源列表, 并做可选的 web 健康检查
-    const resources = [];
-    for (const rec of matchedRecords) {
-      const domain = rec.hostname; 
+    // 3) 构造资源列表
+    const resources = matchedRecords.map((rec) => {
+      const domain = rec.hostname;
       const { isWeb, scheme } = determineIfWebService(rec.service, rec.protocol);
-      let status = "N/A";
-      let accessibleUrl = "";
   
+      // 当前记录的跳转方式(若有自定义则用自定义, 否则用默认)
+      let currentRedirectStatus =
+        globalThis.customRedirectModes[domain] || config.defaultRedirectStatus;
+  
+      // 构建一个超链接(无论web或非web，都尝试给)
       if (isWeb) {
-        // 若是web，测试其在线性
-        const testUrl = `${scheme}://${rec.target}:${rec.port}/`;
-        const health = await checkHealth(testUrl, 2000);
-        status = health.ok ? "Online" : "Offline";
-        accessibleUrl = health.ok ? testUrl : "";
+        //  http(s)://target:port
+        const webUrl = `${scheme}://${rec.target}:${rec.port}`;
+        return {
+          domain,
+          service: rec.service,
+          protocol: rec.protocol,
+          target: rec.target,
+          port: rec.port,
+          link: webUrl, // 用于门户点击
+          redirectStatus: currentRedirectStatus, // === 新增，用于展示
+          raw: config.debugMode ? rec.raw : undefined,
+        };
       } else {
-        // 对于非web，可尝试构建一个本地协议链接
-        // (例如 _ssh => ssh://target:port)
+        // 非Web => 尝试 ssh://, sftp://, rdp://, vnc://
         const localLink = getLocalSchemeLink(rec.service, rec.protocol, rec.target, rec.port);
-        if (localLink) {
-          accessibleUrl = localLink;
-          status = "Service";
-        } else {
-          status = "Service";
-        }
+        return {
+          domain,
+          service: rec.service,
+          protocol: rec.protocol,
+          target: rec.target,
+          port: rec.port,
+          link: localLink || "",
+          redirectStatus: currentRedirectStatus, // === 新增，用于展示
+          raw: config.debugMode ? rec.raw : undefined,
+        };
       }
+    });
   
-      resources.push({
-        domain,
-        service: rec.service,
-        protocol: rec.protocol,
-        target: rec.target,
-        port: rec.port,
-        isWeb,
-        status,
-        accessibleUrl,
-        raw: config.debugMode ? rec.raw : undefined,
-      });
+    // 4) 构造HTML返回
+    return buildPortalPageHTML(resources, config, userPwd);
+  }
+  
+  /**
+   * 如果未输入密码/错误 => 显示一个密码输入表单
+   */
+  function buildPasswordForm(debugMode) {
+    let debugMsg = "";
+    if (debugMode) {
+      debugMsg = `<div style="margin-top: 10px; color: #999;">[DEBUG] 未输入或密码不正确</div>`;
     }
   
-    // 收集警告信息
+    const html = `
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <title>请输入密码</title>
+    <style>${getModernCss()}</style>
+  </head>
+  <body>
+    <div class="container narrow">
+      <h1>访问受限</h1>
+      <p>请在下方输入密码:</p>
+      <form method="POST">
+        <input type="password" name="pwd" placeholder="密码" required />
+        <button type="submit" class="btn">提交</button>
+      </form>
+      ${debugMsg}
+    </div>
+  </body>
+  </html>`;
+    return new Response(html, { headers: { "Content-Type": "text/html;charset=UTF-8" } });
+  }
+  
+  /**
+   * 构造门户页面的HTML
+   */
+  function buildPortalPageHTML(resources, config, userPwd) {
+    // warnings
     const warnings = [];
     if (!config.domainList || config.domainList.length === 0) {
       warnings.push("警告：环境变量 DOMAINS 未正确配置，未能匹配任何域名。");
     }
     if (!config.cfApiToken || !config.cfZoneId) {
-      warnings.push("提示：由于缺少 CF_API_TOKEN 或 CF_ZONE_ID，无法自动扫描全部 SRV 记录。只能使用本地缓存或空列表。");
+      warnings.push("提示：缺少 CF_API_TOKEN 或 CF_ZONE_ID，无法自动扫描 SRV。");
     }
   
-    // 生成 HTML
+    // 门户页面HTML
     let html = `
   <html>
   <head>
     <meta charset="utf-8">
     <title>资源汇总门户</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 20px; }
-      table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-      th, td { border: 1px solid #ccc; padding: 8px 12px; }
-      th { background: #f9f9f9; }
-      .offline { color: red; }
-      .online { color: green; }
-      .warning { margin: 10px 0; padding: 10px; background: #ffefc0; border: 1px solid #ffdd80; }
-      .debug { font-size: 12px; color: #555; }
-    </style>
+    <style>${getModernCss()}</style>
   </head>
   <body>
-    <h1>资源汇总门户</h1>
+    <div class="container">
+      <h1>资源汇总门户</h1>
+      <p>以下列出的记录属于受管控域名 (DOMAINS) 对应的 SRV 服务。</p>
   `;
   
-    // 若处于调试模式，显示当前配置信息
-    if (config.debugMode) {
-      html += `
-      <div class="debug">
-        <h2>调试信息: 当前配置</h2>
-        <pre>${escapeHtml(JSON.stringify(config, null, 2))}</pre>
-        <h2>调试信息: 全部 SRV 记录 (含解析后的 service/protocol/hostname)</h2>
-        <pre>${escapeHtml(JSON.stringify(allSrvRecords, null, 2))}</pre>
-        <h2>调试信息: 筛选后记录 (matchedRecords)</h2>
-        <pre>${escapeHtml(JSON.stringify(matchedRecords, null, 2))}</pre>
-      </div>`;
+    // 显示警告
+    for (const w of warnings) {
+      html += `<div class="alert alert-warn">${w}</div>`;
     }
   
-    // 显示警告信息
-    if (warnings.length > 0) {
-      for (const w of warnings) {
-        html += `<div class="warning">${w}</div>`;
-      }
+    // 如果处于调试模式，显示资源原始
+    if (config.debugMode) {
+      html += `
+      <div class="card debug">
+        <h2>DEBUG: 配置信息</h2>
+        <pre>${escapeHtml(JSON.stringify(config, null, 2))}</pre>
+        <h2>DEBUG: 资源列表</h2>
+        <pre>${escapeHtml(JSON.stringify(resources, null, 2))}</pre>
+      </div>
+      `;
     }
   
     html += `
-    <p>下表列出了系统中所有匹配 <strong>DOMAINS</strong> (含通配符) 且类型为 <code>SRV</code> 的记录。</p>
-    <table>
-      <thead>
-        <tr>
-          <th>域名(子域名)</th>
-          <th>服务类型</th>
-          <th>协议</th>
-          <th>目标主机</th>
-          <th>端口</th>
-          <th>状态</th>
-          <th>访问方式</th>
-        </tr>
-      </thead>
-      <tbody>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>域名(子域名)</th>
+            <th>服务类型</th>
+            <th>协议</th>
+            <th>目标主机</th>
+            <th>端口</th>
+            <th>链接</th>
+            <th>跳转方式</th> <!-- 新增列 -->
+          </tr>
+        </thead>
+        <tbody>
     `;
   
     for (const r of resources) {
-      const statusClass = (r.status === "Online") ? "online" 
-                          : (r.status === "Offline") ? "offline" 
-                          : "";
-      let accessCell = "无可用方式";
-  
-      // 若 r.accessibleUrl 不为空，就给它加超链
-      if (r.accessibleUrl) {
-        accessCell = `<a href="${r.accessibleUrl}" target="_blank">${r.accessibleUrl}</a>`;
-      } else {
-        // 如果是 Web 服务但离线，或是其他服务无法映射
-        if (r.isWeb) {
-          // Web但离线
-          accessCell = "当前离线";
-        } else {
-          // 非web, 并没有映射
-          accessCell = `协议：${r.protocol} / 地址：${r.target}:${r.port}`;
-        }
+      // 无论web或非web，只要存在链接就给超链；否则显示“目标+端口”
+      let linkTd = `${escapeHtml(r.target)}:${r.port}`;
+      if (r.link) {
+        linkTd = `<a href="${r.link}" target="_blank">${escapeHtml(r.link)}</a>`;
       }
+  
+      // === 新增/修改 ===
+      // 下拉框（301/302/307/308），默认选中 r.redirectStatus
+      const selectHtml = `
+        <form method="POST" style="display:inline-block; margin:0; padding:0;">
+          <input type="hidden" name="pwd" value="${escapeHtml(config.portalPasswd)}"/>
+          <input type="hidden" name="domain" value="${escapeHtml(r.domain)}"/>
+          <select name="redirectStatus">
+            ${[301, 302, 307, 308]
+              .map((code) => {
+                const sel = code === r.redirectStatus ? "selected" : "";
+                return `<option value="${code}" ${sel}>${code}</option>`;
+              })
+              .join("")}
+          </select>
+          <button class="btn btn-sm" type="submit">保存</button>
+        </form>
+      `;
   
       html += `
         <tr>
@@ -416,50 +453,44 @@ export default {
           <td>${escapeHtml(r.protocol)}</td>
           <td>${escapeHtml(r.target)}</td>
           <td>${r.port}</td>
-          <td class="${statusClass}">${r.status}</td>
-          <td>${accessCell}</td>
+          <td>${linkTd}</td>
+          <td>${selectHtml}</td>
         </tr>
       `;
   
-      // 若调试模式显示SRV原始记录
+      // 调试模式显示原始记录
       if (config.debugMode && r.raw) {
         html += `
-        <tr class="debug">
+        <tr class="debug-row">
           <td colspan="7">
-            原始记录：<pre>${escapeHtml(JSON.stringify(r.raw, null, 2))}</pre>
+            <pre>${escapeHtml(JSON.stringify(r.raw, null, 2))}</pre>
           </td>
         </tr>`;
       }
     }
   
     html += `
-      </tbody>
-    </table>
+        </tbody>
+      </table>
+    </div>
   </body>
   </html>`;
   
-    return new Response(html, {
-      headers: { "Content-Type": "text/html;charset=UTF-8" },
-    });
+    return new Response(html, { headers: { "Content-Type": "text/html;charset=UTF-8" } });
   }
   
   /**
    * Step E: 处理其他域名 => SRV 跳转
    * 在此实现真实业务逻辑：根据请求域名匹配 SRV 记录，
-   * 若找到且为 Web 服务 => 302 跳转;
+   * 若找到且为 Web 服务 => 按设置的跳转方式跳转;
    * 若非Web => 返回HTML, 展示服务信息 + 可选本地调用链接
    */
   async function handleSrvRedirect(request, env, config) {
     const url = new URL(request.url);
     const hostname = url.hostname;
-  
-    if (config.debugMode) {
-      console.log("[DEBUG] [handleSrvRedirect] 开始对域名进行 SRV 查找, hostname=", hostname);
-    }
-  
     const allSrvRecords = globalThis.srvRecordsCache?.data || [];
   
-    // 只匹配属于 config.domainList 的记录
+    // 只匹配 domainList
     const matchedRecords = allSrvRecords.filter((rec) =>
       config.domainList.some((pattern) => {
         const regex = wildcardToRegex(pattern);
@@ -476,13 +507,9 @@ export default {
     }
   
     if (matchedForHostname.length === 0) {
-      // 未找到 SRV 记录 => 返回 404 或者自定义消息
-      if (config.debugMode) {
-        console.warn("[DEBUG] [handleSrvRedirect] 未找到可用的 SRV 记录, 无法跳转。");
-      }
-      return new Response(`未找到与 ${hostname} 对应的 SRV 记录，无法继续。`, {
+      return new Response(`未找到与 ${hostname} 对应的 SRV 记录。`, {
         status: 404,
-        headers: { "Content-Type": "text/plain; charset=UTF-8" },
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
       });
     }
   
@@ -490,23 +517,24 @@ export default {
     const bestSrv = matchedForHostname[0];
     const { isWeb, scheme } = determineIfWebService(bestSrv.service, bestSrv.protocol);
   
-    if (isWeb) {
-      // Web => 302 跳转
+    if (!isWeb) {
+      // 返回一个HTML，显示服务信息 + 可选链接
+      return buildNonWebResponse(bestSrv, config.debugMode);
+    } else {
+      // Web => 根据 customRedirectModes / defaultRedirectStatus 进行重定向
+      const customStatus = globalThis.customRedirectModes[hostname] || config.defaultRedirectStatus;
       const pathAndQuery = url.pathname + url.search;
       const redirectUrl = `${scheme}://${bestSrv.target}:${bestSrv.port}${pathAndQuery}`;
+  
       if (config.debugMode) {
-        console.log("[DEBUG] [handleSrvRedirect] 准备跳转到 =>", redirectUrl);
+        console.log("[DEBUG] [handleSrvRedirect] 准备跳转到 =>", redirectUrl, "状态码=", customStatus);
       }
-      return Response.redirect(redirectUrl, 302);
-    } else {
-      // 非Web => 返回HTML，显示服务信息 + 可选本地调用链接
-      return buildNonWebResponse(bestSrv, config.debugMode);
+      return Response.redirect(redirectUrl, customStatus);
     }
   }
   
   /**
-   * 对非Web服务，生成一个简易HTML展示页
-   *   显示: 域名, 服务, 协议, 目标主机, 端口, 以及可选的本地链接
+   * 非web => 返回HTML，显示信息 + 可选链接
    */
   function buildNonWebResponse(srv, debugMode) {
     const domain = srv.hostname;
@@ -516,17 +544,17 @@ export default {
     const port = srv.port;
     const localLink = getLocalSchemeLink(service, protocol, target, port);
   
-    let localLinkHtml = "无可用链接";
-    if (localLink) {
-      localLinkHtml = `<a href="${localLink}" target="_blank">${localLink}</a>`;
-    }
+    const linkPart = localLink
+      ? `<a href="${localLink}" target="_blank">${escapeHtml(localLink)}</a>`
+      : `${escapeHtml(target)}:${port}`;
   
     let debugInfo = "";
     if (debugMode && srv.raw) {
       debugInfo = `
-      <h3>原始记录</h3>
-      <pre>${escapeHtml(JSON.stringify(srv.raw, null, 2))}</pre>
-      `;
+      <div class="card debug">
+        <h3>原始记录</h3>
+        <pre>${escapeHtml(JSON.stringify(srv.raw, null, 2))}</pre>
+      </div>`;
     }
   
     const html = `
@@ -534,28 +562,24 @@ export default {
   <head>
     <meta charset="utf-8">
     <title>非Web服务信息</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 20px; }
-      .info { margin: 10px 0; }
-      .debug { background: #f9f9f9; border: 1px solid #ccc; padding: 10px; }
-    </style>
+    <style>${getModernCss()}</style>
   </head>
   <body>
-    <h1>非Web服务信息</h1>
-    <div class="info">
-      <p><strong>域名:</strong> ${escapeHtml(domain)}</p>
-      <p><strong>服务:</strong> ${escapeHtml(service)}</p>
-      <p><strong>协议:</strong> ${escapeHtml(protocol)}</p>
-      <p><strong>目标主机:</strong> ${escapeHtml(target)}</p>
-      <p><strong>端口:</strong> ${port}</p>
-      <p><strong>本地调用:</strong> ${localLinkHtml}</p>
+    <div class="container">
+      <h1>非Web服务信息</h1>
+      <div class="card">
+        <p><strong>域名(子域名):</strong> ${escapeHtml(domain)}</p>
+        <p><strong>服务:</strong> ${escapeHtml(service)}</p>
+        <p><strong>协议:</strong> ${escapeHtml(protocol)}</p>
+        <p><strong>目标主机:</strong> ${escapeHtml(target)}</p>
+        <p><strong>端口:</strong> ${port}</p>
+        <p><strong>可用链接:</strong> ${linkPart}</p>
+      </div>
+      ${debugInfo}
     </div>
-    ${debugInfo}
   </body>
   </html>`;
-    return new Response(html, {
-      headers: { "Content-Type": "text/html; charset=UTF-8" },
-    });
+    return new Response(html, { headers: { "Content-Type": "text/html;charset=UTF-8" } });
   }
   
   /**
@@ -581,22 +605,29 @@ export default {
   }
   
   /**
-   * 为非web服务生成本地协议链接(如果支持)
-   * 示例：_ssh => ssh://target:port, _rdp => rdp://target:port
-   * 你可根据需求扩展更多
+   * 根据service / protocol / target / port 返回可用的本地协议
+   * 例如: _ssh => ssh://target:port, _sftp => sftp://...
+   * 可自行扩展
    */
   function getLocalSchemeLink(service, protocol, target, port) {
     const s = (service || "").toLowerCase();
-  
-    // 简单示例：若是ssh
+    // 例如 SSH
     if (s.includes("_ssh")) {
       return `ssh://${target}:${port}`;
     }
-    // 若是rdp
+    // SFTP
+    if (s.includes("_sftp")) {
+      return `sftp://${target}:${port}`;
+    }
+    // RDP
     if (s.includes("_rdp")) {
       return `rdp://${target}:${port}`;
     }
-    // ...可在此补充更多本地协议映射...
+    // VNC
+    if (s.includes("_vnc")) {
+      return `vnc://${target}:${port}`;
+    }
+    // ...可再扩展
     return "";
   }
   
@@ -604,7 +635,6 @@ export default {
    * 通配符域名 转换为 正则表达式
    */
   function wildcardToRegex(wildcard) {
-    // "*.nat.example.com" => /^.*\.nat\.example\.com$/
     const escaped = wildcard.replace(/\./g, "\\.").replace(/\*/g, ".*");
     return new RegExp("^" + escaped + "$");
   }
@@ -633,7 +663,110 @@ export default {
   }
   
   /**
-   * 将HTML中可能的特殊字符进行转义
+   * 简易CSS：让UI更现代一些 + 一些主流视觉
+   */
+  function getModernCss() {
+    return `
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: #f7f9fa;
+    color: #333;
+  }
+  .container {
+    max-width: 1100px;
+    margin: 30px auto;
+    padding: 0 20px;
+  }
+  .container.narrow {
+    max-width: 500px;
+  }
+  h1, h2, h3 {
+    margin-bottom: 1rem;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+    background: #fff;
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+  }
+  thead {
+    background: #f3f4f6;
+  }
+  th, td {
+    padding: 12px 15px;
+    border-bottom: 1px solid #ececec;
+  }
+  tr:last-child td {
+    border-bottom: none;
+  }
+  .card {
+    background: #fff;
+    padding: 20px;
+    margin: 20px 0;
+    border-radius: 6px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+  }
+  .debug {
+    color: #555;
+    font-size: 0.9rem;
+    background: #f9f9f9;
+  }
+  .debug-row td {
+    background: #f9f9f9;
+    font-size: 0.85rem;
+  }
+  .alert {
+    padding: 15px;
+    margin: 10px 0;
+    border-radius: 6px;
+  }
+  .alert-warn {
+    background-color: #fff4e5;
+    border: 1px solid #ffecb2;
+    color: #8b5e34;
+  }
+  form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  input[type=password] {
+    padding: 8px;
+    font-size: 1rem;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+  }
+  button.btn {
+    background: #4c9af0;
+    color: #fff;
+    padding: 10px 15px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  button.btn:hover {
+    background: #3c8add;
+  }
+  button.btn-sm {
+    padding: 5px 10px;
+    font-size: 0.9rem;
+    margin-left: 6px;
+  }
+  select {
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 5px;
+  }
+  `;
+  }
+  
+  /**
+   * 转义HTML
    */
   function escapeHtml(str) {
     if (!str) return "";
@@ -642,5 +775,4 @@ export default {
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
-  }
-  
+  }   
