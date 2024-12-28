@@ -518,19 +518,28 @@ export default {
     const { isWeb, scheme } = determineIfWebService(bestSrv.service, bestSrv.protocol);
   
     if (!isWeb) {
-      // 返回一个HTML，显示服务信息 + 可选链接
-      return buildNonWebResponse(bestSrv, config.debugMode);
-    } else {
-      // Web => 根据 customRedirectModes / defaultRedirectStatus 进行重定向
-      const customStatus = globalThis.customRedirectModes[hostname] || config.defaultRedirectStatus;
-      const pathAndQuery = url.pathname + url.search;
-      const redirectUrl = `${scheme}://${bestSrv.target}:${bestSrv.port}${pathAndQuery}`;
-  
-      if (config.debugMode) {
-        console.log("[DEBUG] [handleSrvRedirect] 准备跳转到 =>", redirectUrl, "状态码=", customStatus);
+        // 返回一个HTML，显示服务信息 + 可选链接
+        return buildNonWebResponse(bestSrv, config.debugMode);
+      } else {
+        // Web => 根据 customRedirectModes / defaultRedirectStatus 进行重定向
+        const customStatus = globalThis.customRedirectModes[hostname] || config.defaultRedirectStatus;
+        const pathAndQuery = url.pathname + url.search;
+        const redirectUrl = `${scheme}://${bestSrv.target}:${bestSrv.port}${pathAndQuery}`;
+      
+        if (config.debugMode) {
+          console.log("[DEBUG] [handleSrvRedirect] 准备跳转到 =>", redirectUrl, "状态码=", customStatus);
+        }
+      
+        // 设置缓存最大限制为10分钟的头
+        return new Response(null, {
+            status: customStatus,
+            headers: {
+              Location: redirectUrl,
+              "Cache-Control": "max-age=600"
+            }
+          });
       }
-      return Response.redirect(redirectUrl, customStatus);
-    }
+      
   }
   
   /**
