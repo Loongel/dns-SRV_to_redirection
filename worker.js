@@ -507,6 +507,33 @@ export default {
     }
   
     if (matchedForHostname.length === 0) {
+      // 新增门户子域名处理逻辑
+      const portalSubdomain = handlePortalSubdomainFallback(
+        hostname,
+        config.portalDomain,
+        allSrvRecords,
+        config
+      );
+      
+      if (portalSubdomain) {
+        const { scheme, target, port } = portalSubdomain;
+        const pathAndQuery = url.pathname + url.search;
+        const redirectUrl = `${scheme}://${target}:${port}${pathAndQuery}`;
+        const customStatus = globalThis.customRedirectModes[hostname] || config.defaultRedirectStatus;
+
+        if (config.debugMode) {
+          console.log("[DEBUG] [portalSubdomain] 动态生成跳转地址:", redirectUrl);
+        }
+
+        return new Response(null, {
+          status: customStatus,
+          headers: {
+            Location: redirectUrl,
+            "Cache-Control": "max-age=600"
+          }
+        });
+      }
+
       return new Response(`未找到与 ${hostname} 对应的 SRV 记录。`, {
         status: 404,
         headers: { "Content-Type": "text/plain;charset=UTF-8" },
@@ -640,6 +667,61 @@ export default {
     return "";
   }
   
+  /**
+   * 处理门户子域名动态替换逻辑
+   */
+  function handlePortalSubdomainFallback(hostname, portalDomain, allSrvRecords, config) {
+    // 增强域名验证逻辑
+    const domainPattern = new RegExp(`^(.+)\\.${portalDomain.replace(/\./g, '\\.')}$`);
+    const match = hostname.match(domainPattern);
+    
+    if (!match || match[1].includes('.')) {
+      if (config.debugMode) {
+        console.log(`[DEBUG] [portalSubdomain] 无效域名格式: ${hostname}`);
+      }
+      return null;
+    }
+    const subdomain = match[1];
+
+    // 构造web门户子域名
+    const webHostname = `web.${portalDomain}`;
+    
+    // 查找web门户的SRV记录
+    const webSrv = allSrvRecords.find(r =>
+      r.hostname === webHostname &&
+      r.service.startsWith('_http')
+    );
+
+    if (!webSrv) {
+      if (config.debugMode) {
+        console.log(`[DEBUG] [portalSubdomain] 未找到${webHostname}的SRV记录`);
+      }
+      return null;
+    }
+
+    // 增强目标替换逻辑（支持多种前缀格式）
+    const targetRegex = /^(?:web|portal)\./i;
+    if (!targetRegex.test(webSrv.target)) {
+      if (config.debugMode) {
+        console.log(`[DEBUG] [portalSubdomain] 目标格式不匹配: ${webSrv.target}`);
+      }
+      return null;
+    }
+    const newTarget = webSrv.target.replace(targetRegex, `${subdomain}.`);
+    const { scheme } = determineIfWebService(webSrv.service, webSrv.protocol);
+
+    if (config.debugMode) {
+      console.log(`[DEBUG] [portalSubdomain] 动态生成目标: ${scheme}://${newTarget}:${webSrv.port}`);
+      console.log(`[DEBUG] [portalSubdomain] 原始目标: ${webSrv.target} 替换规则: web->${subdomain}`);
+    }
+
+    return {
+      scheme,
+      target: newTarget,
+      port: webSrv.port
+    };
+  }
+
   /**
    * 通配符域名 转换为 正则表达式
    */
