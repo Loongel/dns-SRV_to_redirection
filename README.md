@@ -38,14 +38,21 @@
 
 * 当访问的域名没有显式地在Cloudflare Worker自定义域名中添加时，Cloudflare不会正确提供证书，导致HTTPS访问出错。解决方案：
 
-   1. 使用HTTP访问（推荐）
+   1. (推荐) 使用HTTP访问
       - 跳转后的服务可以是HTTPS
       - 无安全风险
       - 示例：`http://xxx.example.com`
 
-   2. 在Cloudflare Worker自定义域名中添加
+   2. (推荐) 通过浏览器F12 在Cloudflare Worker自定义域名中添加泛域名* 
+      1. 在调试工具中，切换到“网络”，然后再Cloudflare Worker自定义域名中添加任意域名
+      2. 过滤url中搜索`workers/domains/records` 找到POST的记录，右键点击编辑并重发，再最下的“消息体”中，找到hostname,改为目标域名即可
+
+   3. 在Cloudflare Worker自定义域名中添加
       - 解决HTTPS证书问题
       - 适用于必须使用HTTPS的场景
+
+
+
 
 ## 使用案例
 
