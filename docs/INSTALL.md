@@ -36,6 +36,7 @@ PORTAL_PASSWD = "change-me"
 DEFAULT_REDIRECT_STATUS = "307"
 CACHE_TTL_SECONDS = "300"
 NATMAP_REFRESH_QUEUE_NAME = "_natmap-refresh.s.example.com"
+TAILWIND_CDN_URL = "https://cdn.bootcdn.net/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js"
 ```
 
 Set secrets:

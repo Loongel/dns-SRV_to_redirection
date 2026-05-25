@@ -1,4 +1,43 @@
-/** Cloudflare Worker - SRV redirect and responsive portal for natmap. */
+/**
+ * 项目：dns-SRV_to_redirection / NATMap SRV Portal
+ * 版本：0.2.0
+ *
+ * 项目介绍：
+ * - 部署在 Cloudflare Worker，用 Cloudflare DNS 中的 SRV 记录作为“服务入口目录”。
+ * - 访问受管 Web 域名时，按 SRV 记录重定向到真实目标域名和端口。
+ * - 访问门户域名时，展示资源列表、搜索、跳转状态切换、端口刷新按钮。
+ * - 端口刷新通过写入一个 Cloudflare TXT 队列记录通知 OpenWrt；OpenWrt 侧由 natmap 自定义脚本轮询该 TXT。
+ * - 支持泛域名模板跳转：例如 newapi.s.example.com 可复用 web.s.example.com 的 SRV 端口，并把目标前缀替换为 newapi。
+ *
+ * 环境变量说明：
+ * - DOMAINS：受管域名匹配列表，逗号分隔，支持通配符；例：*.s.example.com
+ * - PORTAL_DOMAIN：门户域名；例：s.example.com
+ * - PORTAL_PASSWD：门户/API 密码；建议显式配置，不依赖代码默认值
+ * - DEFAULT_REDIRECT_STATUS：默认跳转状态码，仅允许 301/302/307/308；默认 302
+ * - CACHE_TTL_SECONDS：Cloudflare SRV 记录缓存秒数；默认 300
+ * - SRV_MAX_AGE_SECONDS：可选，过滤过旧 SRV 记录；0 表示不过滤
+ * - NATMAP_REFRESH_QUEUE_NAME：端口刷新 TXT 队列名；默认 _natmap-refresh.<PORTAL_DOMAIN>
+ * - WILDCARD_TEMPLATE_HOSTNAME：泛域名跳转模板 SRV 主机名；默认 web.<PORTAL_DOMAIN>
+ * - WILDCARD_TEMPLATE_TARGET_PREFIXES：允许替换的模板目标前缀；默认 web,portal
+ * - TAILWIND_CDN_URL：门户 UI 使用的 Tailwind CDN 地址，默认 BootCDN
+ * - DEBUG_MODE：true 时在页面展示脱敏调试信息
+ *
+ * Secret 示例：
+ * - wrangler secret put CF_API_TOKEN
+ * - wrangler secret put CF_ZONE_ID
+ *
+ * wrangler.toml 示例：
+ * [vars]
+ * DOMAINS = "*.s.example.com"
+ * PORTAL_DOMAIN = "s.example.com"
+ * PORTAL_PASSWD = "change-me"
+ * DEFAULT_REDIRECT_STATUS = "302"
+ * CACHE_TTL_SECONDS = "300"
+ * NATMAP_REFRESH_QUEUE_NAME = "_natmap-refresh.s.example.com"
+ * WILDCARD_TEMPLATE_HOSTNAME = "web.s.example.com"
+ * WILDCARD_TEMPLATE_TARGET_PREFIXES = "web,portal"
+ * TAILWIND_CDN_URL = "https://cdn.bootcdn.net/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js"
+ */
 
 export default {
   async fetch(request, env, ctx) {
@@ -17,6 +56,7 @@ export default {
 };
 
 function initConfig(env) {
+  // 统一解析 Worker 环境变量；这里不做远程 IO，便于每个请求快速构造配置。
   const domainList = (env.DOMAINS || "").split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
   let portalDomain = (env.PORTAL_DOMAIN || "").trim().toLowerCase();
   if (!portalDomain) {
@@ -29,7 +69,7 @@ function initConfig(env) {
     portalDomain,
     cfApiToken: env.CF_API_TOKEN || "",
     cfZoneId: env.CF_ZONE_ID || "",
-    portalPasswd: (env.PORTAL_PASSWD || "11111111").trim(),
+    portalPasswd: (env.PORTAL_PASSWD || "ABCCBA").trim(),
     debugMode: env.DEBUG_MODE === "true",
     defaultRedirectStatus: parseRedirectStatus(env.DEFAULT_REDIRECT_STATUS, 302),
     cacheTtl: parsePositiveInt(env.CACHE_TTL_SECONDS, 300),
@@ -37,6 +77,7 @@ function initConfig(env) {
     refreshQueueName: (env.NATMAP_REFRESH_QUEUE_NAME || `_natmap-refresh.${portalDomain}`).trim().toLowerCase(),
     wildcardTemplateHostname: normalizeHostname(env.WILDCARD_TEMPLATE_HOSTNAME || `web.${portalDomain}`),
     wildcardTemplateTargetPrefixes: parseCsv(env.WILDCARD_TEMPLATE_TARGET_PREFIXES || "web,portal"),
+    tailwindCdnUrl: (env.TAILWIND_CDN_URL || "https://cdn.bootcdn.net/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js").trim(),
   };
 }
 
@@ -55,12 +96,14 @@ function parseCsv(value) {
   return String(value || "").split(",").map((item) => item.trim().replace(/\.+$/, "").toLowerCase()).filter(Boolean);
 }
 function initSrvCacheIfEmpty() {
+  // Cloudflare Worker isolate 可复用 globalThis，因此缓存放这里减少 API 调用。
   if (!globalThis.srvRecordsCache) {
     globalThis.srvRecordsCache = { data: [], fetchedAt: 0, sourceCount: 0, duplicateCount: 0, staleCount: 0, lastError: "" };
   }
 }
 
 function isRateLimited(key, limit, windowMs) {
+  // 轻量内存限速：保护强制拉取和端口刷新 API，避免门户被刷爆 Cloudflare API。
   if (!globalThis.portalRateLimits) globalThis.portalRateLimits = new Map();
   const now = Date.now();
   const hits = (globalThis.portalRateLimits.get(key) || []).filter((ts) => now - ts < windowMs);
@@ -90,6 +133,7 @@ function canQueueRefresh(request, domain) {
 }
 
 async function ensureSrvRecordsCache(config, options = {}) {
+  // 读取并规范化 SRV 记录；force=true 时绕过 TTL，用于用户刷新或前端自动轮询。
   initSrvCacheIfEmpty();
   const now = Math.floor(Date.now() / 1000);
   if (!options.force && now - globalThis.srvRecordsCache.fetchedAt <= config.cacheTtl) return;
@@ -127,6 +171,7 @@ async function fetchAllSrvRecords(config) {
 }
 
 function normalizeSrvRecords(records, config) {
+  // 同一个 hostname/service/protocol 只保留最新记录，避免 DDNS 异常留下重复 SRV。
   const now = Date.now();
   const newestByName = new Map();
   let staleCount = 0;
@@ -166,6 +211,7 @@ function compareSrvFreshness(a, b) { return b.updatedAt - a.updatedAt || b.modif
 function compareSrvDisplay(a, b) { return a.hostname.localeCompare(b.hostname) || a.service.localeCompare(b.service) || a.protocol.localeCompare(b.protocol) || a.priority - b.priority || b.weight - a.weight; }
 
 async function handlePortalPageWithAuth(request, config) {
+  // 门户页兼容 GET 展示、表单 POST 更新跳转状态、表单 POST 触发端口刷新。
   const url = new URL(request.url);
   if (url.pathname.startsWith("/api/")) return handlePortalApi(request, config);
   let userPwd = "";
@@ -180,7 +226,7 @@ async function handlePortalPageWithAuth(request, config) {
     newRedirectStatus = String(formData.get("redirectStatus") || "");
     refreshDomain = String(formData.get("refreshDomain") || "").trim().toLowerCase();
   } else userPwd = url.searchParams.get("pwd") || "";
-  if (userPwd !== config.portalPasswd) return buildPasswordForm(config.debugMode);
+  if (userPwd !== config.portalPasswd) return buildPasswordForm(config);
   if (request.method === "GET") {
     notice = getPortalNotice(url.searchParams);
     if (url.searchParams.get("force") === "1" && canForceFetchSrv(request)) await ensureSrvRecordsCache(config, { force: true });
@@ -205,6 +251,7 @@ async function handlePortalPageWithAuth(request, config) {
   return buildPortalPageHTML(managedRecords.map((r) => buildResource(r, config)), config, userPwd, notice);
 }
 async function handlePortalApi(request, config) {
+  // 前端异步接口：资源轮询只读，端口刷新写 TXT 队列，二者都必须带门户密码。
   const url = new URL(request.url);
   if (url.pathname === "/api/resources" && request.method === "GET") {
     const pwd = url.searchParams.get("pwd") || "";
@@ -240,7 +287,7 @@ async function readRequestPayload(request) {
   return Object.fromEntries(formData.entries());
 }
 function getPortalNotice(params) {
-  if (params.get("saved")) return `${params.get("saved")} 的跳转方式已保存。`;
+  if (params.get("saved")) return `${params.get("saved")} 的跳转方式已更新。`;
   if (params.get("refreshQueued")) return `${params.get("refreshQueued")} 的端口刷新请求已提交。页面会自动检查新端口。`;
   if (params.get("refreshError")) return params.get("refreshError");
   return "";
@@ -256,14 +303,23 @@ function redirectToPortal(url, pwd, params = {}) {
 function getManagedSrvRecords(config) { return (globalThis.srvRecordsCache?.data || []).filter((r) => matchesManagedDomain(r.hostname, config.domainList)); }
 function matchesManagedDomain(hostname, domainList) { return domainList.some((pattern) => wildcardToRegex(pattern).test(hostname)); }
 function buildResource(record, config) {
+  // 将 SRV 原始记录转换成门户直接渲染的数据结构。
   const { isWeb, scheme } = determineIfWebService(record.service, record.protocol);
   const link = isWeb ? `${scheme}://${record.target}:${record.port}` : getLocalSchemeLink(record.service, record.protocol, record.target, record.port);
   return { domain: record.hostname, service: record.service, protocol: record.protocol, target: record.target, port: record.port, link, isWeb, updatedAt: record.updatedAt, updatedIso: record.updatedAt ? new Date(record.updatedAt).toISOString() : "", updatedLabel: formatRecordTime(record.updatedAt), redirectStatus: globalThis.customRedirectModes[record.hostname] || config.defaultRedirectStatus, raw: config.debugMode ? record.raw : undefined };
 }
 
-function buildPasswordForm(debugMode) {
-  const debugMsg = debugMode ? `<p class="form-note">DEBUG: password missing or incorrect.</p>` : "";
-  return htmlResponse(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>访问受限</title><style>${getModernCss()}</style></head><body class="auth-page"><main class="auth-shell"><section class="auth-card"><div class="brand-mark">SRV</div><h1>访问受限</h1><form method="POST" class="auth-form"><input type="password" name="pwd" placeholder="输入密码" required autocomplete="current-password"><button type="submit" class="btn btn-block">提交</button></form>${debugMsg}</section></main></body></html>`);
+function getPageHead(title, config = {}) {
+  // UI 只使用 Tailwind CDN，不内联自定义 CSS，方便 Worker 单文件部署。
+  const tailwind = config.tailwindCdnUrl
+    ? `<script src="${escapeAttribute(config.tailwindCdnUrl)}"></script>`
+    : "";
+  return `<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title>${tailwind}</head>`;
+}
+
+function buildPasswordForm(config = {}) {
+  const debugMsg = config.debugMode ? `<p class="mt-3 text-sm text-amber-200/60">DEBUG: password missing or incorrect.</p>` : "";
+  return htmlResponse(`<!doctype html><html lang="zh-CN">${getPageHead("访问受限", config)}<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"><main class="grid min-h-screen place-items-center bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.16),transparent_34%)] px-4 py-8"><section class="w-full max-w-sm rounded-2xl border border-amber-300/20 bg-zinc-950/85 p-6 shadow-2xl shadow-black/70 ring-1 ring-amber-100/5 backdrop-blur"><div class="mb-5 inline-flex h-10 min-w-14 items-center justify-center rounded-xl border border-amber-300/25 bg-amber-300/10 px-3 text-sm font-black text-amber-300">SRV</div><h1 class="text-2xl font-bold tracking-tight text-zinc-50">访问受限</h1><form method="POST" class="mt-6 grid gap-3"><input class="h-11 rounded-xl border border-amber-300/20 bg-black/35 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-amber-300/70 focus:ring-4 focus:ring-amber-300/10" type="password" name="pwd" placeholder="输入密码" required autocomplete="current-password"><button type="submit" class="h-11 rounded-xl bg-amber-300 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-amber-200 focus:outline-none focus:ring-4 focus:ring-amber-300/20">提交</button></form>${debugMsg}</section></main></body></html>`);
 }
 function buildPortalPageHTML(resources, config, userPwd, notice = "") {
   const cache = globalThis.srvRecordsCache || {};
@@ -273,26 +329,31 @@ function buildPortalPageHTML(resources, config, userPwd, notice = "") {
   const rows = resources.map((r) => buildResourceRow(r, userPwd)).join("");
   const cards = resources.map((r) => buildResourceCard(r, userPwd)).join("");
   const debug = config.debugMode ? buildDebugBlock(resources, config) : "";
-  const emptyState = resources.length ? "" : `<section class="empty">未找到匹配的 SRV 记录。</section>`;
-  return htmlResponse(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>资源门户</title><style>${getModernCss()}</style></head><body><main class="shell"><header class="topbar"><div class="title-block"><p class="eyebrow">NATMap SRV Portal</p><h1>资源门户</h1></div><div class="stats"><span><strong>${resources.length}</strong>可用</span><span><strong>${cache.duplicateCount || 0}</strong>折叠</span><span><strong>${formatCacheTime(cache.fetchedAt)}</strong>更新</span></div></header>${notice ? `<section class="notice">${escapeHtml(notice)}</section>` : ""}${warnings.map((w) => `<section class="alert">${escapeHtml(w)}</section>`).join("")}${emptyState}<section class="toolbar"><label class="search-box"><span>搜索</span><input id="resourceSearch" type="search" placeholder="输入域名、服务、端口或目标" autocomplete="off"></label></section><section class="table-panel"><table><colgroup><col class="col-domain"><col class="col-service"><col class="col-target"><col class="col-port"><col class="col-time"><col class="col-link"><col class="col-action"><col class="col-refresh"></colgroup><thead><tr><th>域名</th><th>服务</th><th>目标</th><th>端口</th><th>记录时间</th><th>链接</th><th>跳转</th><th>刷新</th></tr></thead><tbody>${rows}</tbody></table></section><section class="mobile-list">${cards}</section>${debug}<script>${getPortalScript()}</script></main></body></html>`);
+  const emptyState = resources.length ? "" : `<section class="rounded-2xl border border-dashed border-amber-300/25 bg-zinc-900/60 px-5 py-10 text-center text-sm text-zinc-400">未找到匹配的 SRV 记录。</section>`;
+  const warningHtml = warnings.map((w) => `<section class="rounded-2xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">${escapeHtml(w)}</section>`).join("");
+  const noticeHtml = notice ? `<section class="rounded-2xl border border-amber-300/30 bg-amber-300/10 px-4 py-3 text-sm font-medium text-amber-100">${escapeHtml(notice)}</section>` : "";
+  return htmlResponse(`<!doctype html><html lang="zh-CN">${getPageHead("资源门户", config)}<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"><main class="mx-auto flex w-full max-w-7xl flex-col gap-5 bg-[radial-gradient(circle_at_top_left,rgba(251,191,36,0.12),transparent_32%)] px-4 py-5 sm:px-6 lg:px-8"><header class="flex flex-col gap-5 rounded-3xl border border-amber-300/20 bg-zinc-950/80 p-5 shadow-2xl shadow-black/50 ring-1 ring-amber-100/5 backdrop-blur sm:flex-row sm:items-end sm:justify-between"><div class="min-w-0"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">NATMap SRV Portal</p><h1 class="mt-1 text-2xl font-bold tracking-tight text-zinc-50 sm:text-3xl">资源门户</h1></div><div class="grid grid-cols-3 gap-2 text-center sm:min-w-80"><span class="rounded-2xl border border-amber-300/20 bg-black/30 px-3 py-2"><strong class="block text-lg font-bold text-amber-200">${resources.length}</strong><span class="text-xs text-zinc-500">可用</span></span><span class="rounded-2xl border border-amber-300/20 bg-black/30 px-3 py-2"><strong class="block text-lg font-bold text-amber-200">${cache.duplicateCount || 0}</strong><span class="text-xs text-zinc-500">折叠</span></span><span class="rounded-2xl border border-amber-300/20 bg-black/30 px-3 py-2"><strong class="block text-lg font-bold text-amber-200">${formatCacheTime(cache.fetchedAt)}</strong><span class="text-xs text-zinc-500">更新</span></span></div></header>${noticeHtml}${warningHtml}${emptyState}<section class="rounded-2xl border border-amber-300/15 bg-zinc-950/70 p-4 shadow-lg shadow-black/30 ring-1 ring-white/5"><label class="flex w-full flex-col gap-2 md:max-w-2xl"><span class="text-xs font-semibold text-zinc-500">搜索</span><input id="resourceSearch" class="h-11 rounded-xl border border-amber-300/20 bg-black/35 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-amber-300/70 focus:ring-4 focus:ring-amber-300/10" type="search" placeholder="输入域名、服务、端口或目标" autocomplete="off"></label></section><section class="hidden overflow-hidden rounded-2xl border border-amber-300/15 bg-zinc-950/75 shadow-2xl shadow-black/40 ring-1 ring-white/5 xl:block"><div class="overflow-x-auto"><table class="w-full min-w-[1120px] table-fixed border-collapse"><colgroup><col class="w-[18%]"><col class="w-[10%]"><col class="w-[15%]"><col class="w-[7%]"><col class="w-[12%]"><col class="w-[17%]"><col class="w-[11%]"><col class="w-[10%]"></colgroup><thead class="bg-black/45 text-xs font-semibold uppercase tracking-wide text-zinc-500"><tr><th class="px-4 py-3 text-left">域名</th><th class="px-4 py-3 text-left">服务</th><th class="px-4 py-3 text-left">目标</th><th class="px-4 py-3 text-left">端口</th><th class="px-4 py-3 text-left">记录时间</th><th class="px-4 py-3 text-left">链接</th><th class="px-4 py-3 text-left">跳转</th><th class="px-4 py-3 text-left">刷新</th></tr></thead><tbody class="divide-y divide-amber-300/10 text-sm">${rows}</tbody></table></div></section><section class="grid gap-3 md:grid-cols-2 xl:hidden">${cards}</section>${debug}<script>${getPortalScript()}</script></main></body></html>`);
 }
 function buildResourceRow(r, userPwd) {
   const search = `${r.domain} ${r.service} ${r.protocol} ${r.target} ${r.port}`.toLowerCase();
-  return `<tr data-search="${escapeAttribute(search)}" data-domain="${escapeAttribute(r.domain)}" data-port="${r.port}"><td><span class="domain" title="${escapeAttribute(r.domain)}">${escapeHtml(r.domain)}</span></td><td><span class="service-pill">${escapeHtml(r.service.replace(/^_/, ""))}</span><span class="protocol">${escapeHtml(r.protocol)}</span></td><td><span class="host" title="${escapeAttribute(r.target)}">${escapeHtml(r.target)}</span></td><td><code>${r.port}</code></td><td><span class="time" data-time="${escapeAttribute(r.updatedIso)}">${escapeHtml(r.updatedLabel)}</span></td><td>${buildLinkHtml(r)}</td><td>${buildRedirectForm(r, userPwd)}</td><td>${buildRefreshForm(r, userPwd)}</td></tr>`;
+  return `<tr class="bg-zinc-900/70 transition hover:bg-zinc-800/80" data-search="${escapeAttribute(search)}" data-domain="${escapeAttribute(r.domain)}" data-port="${r.port}"><td class="px-4 py-3 align-middle"><span class="block truncate font-semibold text-zinc-50" title="${escapeAttribute(r.domain)}">${escapeHtml(r.domain)}</span></td><td class="px-4 py-3 align-middle"><div class="flex items-center gap-2"><span class="inline-flex h-7 items-center rounded-full border border-amber-300/25 bg-amber-300/10 px-2.5 text-xs font-semibold text-amber-200">${escapeHtml(r.service.replace(/^_/, ""))}</span><span class="text-xs text-zinc-500">${escapeHtml(r.protocol)}</span></div></td><td class="px-4 py-3 align-middle"><span class="block truncate text-zinc-300" title="${escapeAttribute(r.target)}">${escapeHtml(r.target)}</span></td><td class="px-4 py-3 align-middle"><code class="rounded-lg border border-amber-300/15 bg-black/30 px-2 py-1 font-mono text-sm font-semibold text-amber-200">${r.port}</code></td><td class="px-4 py-3 align-middle"><span class="time text-sm text-zinc-500" data-time="${escapeAttribute(r.updatedIso)}">${escapeHtml(r.updatedLabel)}</span></td><td class="px-4 py-3 align-middle">${buildLinkHtml(r)}</td><td class="px-4 py-3 align-middle">${buildRedirectForm(r, userPwd)}</td><td class="px-4 py-3 align-middle">${buildRefreshForm(r, userPwd)}</td></tr>`;
 }
 function buildResourceCard(r, userPwd) {
   const search = `${r.domain} ${r.service} ${r.protocol} ${r.target} ${r.port}`.toLowerCase();
-  return `<article class="resource-card" data-search="${escapeAttribute(search)}" data-domain="${escapeAttribute(r.domain)}" data-port="${r.port}"><div class="card-head"><div><h2>${escapeHtml(r.domain)}</h2><p>${escapeHtml(r.target)}:${r.port}</p></div><span class="service-pill">${escapeHtml(r.service.replace(/^_/, ""))}</span></div><dl><div><dt>协议</dt><dd>${escapeHtml(r.protocol)}</dd></div><div><dt>记录</dt><dd><span class="time" data-time="${escapeAttribute(r.updatedIso)}">${escapeHtml(r.updatedLabel)}</span></dd></div><div><dt>链接</dt><dd>${buildLinkHtml(r)}</dd></div></dl><div class="card-actions">${buildRedirectForm(r, userPwd)}${buildRefreshForm(r, userPwd)}</div></article>`;
+  return `<article class="rounded-2xl border border-amber-300/15 bg-zinc-950/75 p-4 shadow-lg shadow-black/30 ring-1 ring-white/5" data-search="${escapeAttribute(search)}" data-domain="${escapeAttribute(r.domain)}" data-port="${r.port}"><div class="flex items-start justify-between gap-3"><div class="min-w-0"><h2 class="truncate text-base font-bold text-zinc-50">${escapeHtml(r.domain)}</h2><p class="mt-1 break-all text-sm text-zinc-500">${escapeHtml(r.target)}:${r.port}</p></div><span class="shrink-0 rounded-full border border-amber-300/25 bg-amber-300/10 px-2.5 py-1 text-xs font-semibold text-amber-200">${escapeHtml(r.service.replace(/^_/, ""))}</span></div><dl class="mt-4 grid gap-2 text-sm"><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-2"><dt class="text-zinc-500">协议</dt><dd class="min-w-0 text-zinc-300">${escapeHtml(r.protocol)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-2"><dt class="text-zinc-500">记录</dt><dd class="min-w-0 text-zinc-300"><span class="time" data-time="${escapeAttribute(r.updatedIso)}">${escapeHtml(r.updatedLabel)}</span></dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-2"><dt class="text-zinc-500">链接</dt><dd class="min-w-0">${buildLinkHtml(r)}</dd></div></dl><div class="mt-4 grid grid-cols-[minmax(0,1fr)_6rem] gap-2">${buildRedirectForm(r, userPwd)}${buildRefreshForm(r, userPwd)}</div></article>`;
 }
-function buildLinkHtml(r) { return r.link ? `<a class="link" href="${escapeAttribute(r.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.link)}</a>` : `<span class="muted">${escapeHtml(r.target)}:${r.port}</span>`; }
+function buildLinkHtml(r) { return r.link ? `<a class="block truncate text-sm font-semibold text-amber-200 underline decoration-amber-300/50 underline-offset-4 hover:text-amber-100" href="${escapeAttribute(r.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.link)}</a>` : `<span class="block truncate text-sm text-zinc-500">${escapeHtml(r.target)}:${r.port}</span>`; }
 function buildRedirectForm(r, userPwd) {
-  const options = [301, 302, 307, 308].map((code) => `<option value="${code}"${code === r.redirectStatus ? " selected" : ""}>${code}</option>`).join("");
-  return `<form method="POST" class="redirect-form"><input type="hidden" name="pwd" value="${escapeAttribute(userPwd)}"><input type="hidden" name="domain" value="${escapeAttribute(r.domain)}"><select name="redirectStatus" aria-label="redirect status">${options}</select><button class="btn btn-sm" type="submit">保存</button></form>`;
+  const labels = { 301: "301 永久", 302: "302 临时", 307: "307 临时", 308: "308 永久" };
+  const current = Number(r.redirectStatus);
+  const options = [301, 302, 307, 308].map((code) => `<option value="${code}"${code === current ? " selected" : ""}>${labels[code]}</option>`).join("");
+  return `<form method="POST" class="redirect-form"><input type="hidden" name="pwd" value="${escapeAttribute(userPwd)}"><input type="hidden" name="domain" value="${escapeAttribute(r.domain)}"><select class="h-9 w-full min-w-0 rounded-xl border border-amber-300/25 bg-black/40 px-2 text-sm font-semibold text-amber-100 outline-none transition focus:border-amber-300/70 focus:ring-4 focus:ring-amber-300/10" name="redirectStatus" data-current="${current}" aria-label="redirect status">${options}</select></form>`;
 }
 function buildRefreshForm(r, userPwd) {
-  return `<form method="POST" class="refresh-form"><input type="hidden" name="pwd" value="${escapeAttribute(userPwd)}"><input type="hidden" name="refreshDomain" value="${escapeAttribute(r.domain)}"><input type="hidden" name="currentPort" value="${r.port}"><button class="icon-btn" type="submit" title="请求 OpenWrt 为该资源重新打洞换端口" aria-label="刷新 ${escapeAttribute(r.domain)} 的端口">刷新</button></form>`;
+  return `<form method="POST" class="refresh-form"><input type="hidden" name="pwd" value="${escapeAttribute(userPwd)}"><input type="hidden" name="refreshDomain" value="${escapeAttribute(r.domain)}"><input type="hidden" name="currentPort" value="${r.port}"><button class="h-9 w-full rounded-xl border border-amber-300/30 bg-amber-300/10 px-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-300/20 disabled:cursor-wait disabled:opacity-60" type="submit" title="请求 OpenWrt 为该资源重新打洞换端口" aria-label="刷新 ${escapeAttribute(r.domain)} 的端口">刷新</button></form>`;
 }
 function getPortalScript() {
+  // 门户前端逻辑：本地时区显示、搜索过滤、端口刷新轮询、跳转状态确认。
   return `(() => {
   const renderLocalTimes = () => {
     const formatter = new Intl.DateTimeFormat(undefined, {
@@ -319,10 +380,10 @@ function getPortalScript() {
   const items = Array.from(document.querySelectorAll('[data-search]'));
   if (input) {
     const empty = document.createElement('section');
-    empty.className = 'empty search-empty';
+    empty.className = 'search-empty rounded-2xl border border-dashed border-amber-300/25 bg-zinc-900/60 px-5 py-10 text-center text-sm text-zinc-500';
     empty.textContent = '没有匹配的资源。';
     empty.hidden = true;
-    document.querySelector('.shell').appendChild(empty);
+    document.querySelector('main').appendChild(empty);
     input.addEventListener('input', () => {
       const q = input.value.trim().toLowerCase();
       let shown = 0;
@@ -351,9 +412,9 @@ function getPortalScript() {
   };
   const refreshCard = (() => {
     const wrap = document.createElement('section');
-    wrap.className = 'refresh-card';
+    wrap.className = 'refresh-card fixed inset-x-4 bottom-4 z-20 grid max-w-md grid-cols-[2rem_minmax(0,1fr)_1.75rem] items-center gap-3 rounded-2xl border border-amber-300/25 bg-zinc-900/95 p-4 shadow-2xl shadow-black/40 ring-1 ring-white/5 sm:left-auto sm:right-6 sm:bottom-6 sm:w-[26rem]';
     wrap.hidden = true;
-    wrap.innerHTML = '<div class="spinner" aria-hidden="true"></div><div class="refresh-copy"><strong></strong><p></p></div><button type="button" class="refresh-close" aria-label="关闭">×</button>';
+    wrap.innerHTML = '<div class="refresh-spinner h-7 w-7 animate-spin rounded-full border-[3px] border-amber-300/20 border-t-amber-300 text-[10px] font-bold leading-7 text-amber-200" aria-hidden="true"></div><div class="min-w-0"><strong class="block text-sm font-semibold text-zinc-50"></strong><p class="mt-1 text-sm leading-5 text-zinc-400"></p></div><button type="button" class="grid h-7 w-7 place-items-center rounded-lg bg-white/10 text-lg leading-none text-zinc-400 transition hover:bg-white/15 hover:text-zinc-100" aria-label="关闭">×</button>';
     document.body.appendChild(wrap);
     wrap.querySelector('button').addEventListener('click', () => { wrap.hidden = true; });
     return wrap;
@@ -361,7 +422,13 @@ function getPortalScript() {
   const showRefreshCard = (title, detail, done = false) => {
     refreshCard.querySelector('strong').textContent = title;
     refreshCard.querySelector('p').textContent = detail;
-    refreshCard.classList.toggle('is-done', done);
+    const spinner = refreshCard.querySelector('.refresh-spinner');
+    if (spinner) {
+      spinner.textContent = done ? 'OK' : '';
+      spinner.className = done
+        ? 'refresh-spinner grid h-7 w-7 place-items-center rounded-full border border-amber-300/30 bg-amber-300/10 text-[10px] font-bold text-amber-200'
+        : 'refresh-spinner h-7 w-7 animate-spin rounded-full border-[3px] border-amber-300/20 border-t-amber-300 text-[10px] font-bold leading-7 text-amber-200';
+    }
     refreshCard.hidden = false;
   };
   const pollResources = async () => {
@@ -405,6 +472,59 @@ function getPortalScript() {
     pollForPortChange(queuedFromUrl, oldPort);
   }
 
+  const redirectConfirm = (() => {
+    const overlay = document.createElement('section');
+    overlay.className = 'redirect-confirm fixed inset-0 z-30 hidden items-end justify-center bg-black/70 p-4 backdrop-blur-sm sm:items-center';
+    overlay.innerHTML = '<div class="w-full max-w-md rounded-2xl border border-amber-300/25 bg-zinc-950 p-5 shadow-2xl shadow-black/70 ring-1 ring-amber-100/10"><div class="flex items-start justify-between gap-4"><div class="min-w-0"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">Redirect Mode</p><h2 class="mt-1 text-lg font-bold text-zinc-50">确认跳转状态</h2></div><button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white/10 text-lg leading-none text-zinc-400 transition hover:bg-white/15 hover:text-zinc-100" data-cancel aria-label="关闭">×</button></div><p class="mt-4 break-all text-sm leading-6 text-zinc-300" data-message></p><div class="mt-5 grid grid-cols-2 gap-2"><button type="button" class="h-10 rounded-xl border border-amber-300/20 bg-black/30 px-3 text-sm font-semibold text-zinc-300 transition hover:bg-white/10 hover:text-zinc-100" data-cancel>取消</button><button type="button" class="h-10 rounded-xl bg-amber-300 px-3 text-sm font-semibold text-zinc-950 transition hover:bg-amber-200 focus:outline-none focus:ring-4 focus:ring-amber-300/20" data-confirm>确认更新</button></div></div>';
+    document.body.appendChild(overlay);
+    const message = overlay.querySelector('[data-message]');
+    const confirmButton = overlay.querySelector('[data-confirm]');
+    let pending = null;
+    const close = (restore) => {
+      if (restore && pending) pending.select.value = pending.previous;
+      pending = null;
+      overlay.classList.add('hidden');
+      overlay.classList.remove('flex');
+    };
+    overlay.querySelectorAll('[data-cancel]').forEach((button) => button.addEventListener('click', () => close(true)));
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) close(true);
+    });
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !overlay.classList.contains('hidden')) close(true);
+    });
+    confirmButton.addEventListener('click', () => {
+      if (!pending) return;
+      const { form, select, next } = pending;
+      select.dataset.current = next;
+      pending = null;
+      overlay.classList.add('hidden');
+      overlay.classList.remove('flex');
+      form.requestSubmit ? form.requestSubmit() : form.submit();
+    });
+    return {
+      open(nextPending) {
+        pending = nextPending;
+        message.textContent = '将 ' + pending.domain + ' 的跳转状态改为 ' + pending.label + '。';
+        overlay.classList.remove('hidden');
+        overlay.classList.add('flex');
+        confirmButton.focus();
+      }
+    };
+  })();
+
+  document.querySelectorAll('.redirect-form select').forEach((select) => {
+    select.addEventListener('change', () => {
+      const form = select.form;
+      const domain = form.querySelector('input[name="domain"]').value;
+      const previous = select.dataset.current || select.defaultValue;
+      const next = select.value;
+      if (next === previous) return;
+      const label = select.options[select.selectedIndex] ? select.options[select.selectedIndex].textContent : next;
+      redirectConfirm.open({ form, select, domain, previous, next, label });
+    });
+  });
+
   document.querySelectorAll('.refresh-form').forEach((form) => {
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -443,10 +563,11 @@ function getPortalScript() {
 }
 function buildDebugBlock(resources, config) {
   const safeConfig = { ...config, cfApiToken: config.cfApiToken ? "***" : "", portalPasswd: config.portalPasswd ? "***" : "" };
-  return `<section class="debug"><h2>DEBUG</h2><pre>${escapeHtml(JSON.stringify({ config: safeConfig, resources }, null, 2))}</pre></section>`;
+  return `<section class="rounded-2xl border border-amber-300/15 bg-zinc-900/90 p-4 shadow-lg shadow-black/20"><h2 class="text-sm font-semibold text-amber-200">DEBUG</h2><pre class="mt-3 max-h-96 overflow-auto rounded-xl border border-amber-300/10 bg-black/60 p-4 text-xs leading-5 text-zinc-300">${escapeHtml(JSON.stringify({ config: safeConfig, resources }, null, 2))}</pre></section>`;
 }
 
 async function enqueueNatmapRefresh(domain, config) {
+  // 写入单条 TXT 队列记录；OpenWrt 侧轮询 DNS TXT 后执行对应 natmap section 的随机端口刷新。
   if (!config.cfApiToken || !config.cfZoneId) return { ok: false, error: "缺少 Cloudflare API 配置" };
   const content = `${domain}|${Date.now()}|${crypto.randomUUID()}`;
   const apiBase = `https://api.cloudflare.com/client/v4/zones/${config.cfZoneId}/dns_records`;
@@ -465,6 +586,7 @@ async function enqueueNatmapRefresh(domain, config) {
 }
 
 function handlePortalSubdomainFallback(hostname, config, records) {
+  // 泛域名模板逻辑：无精确 SRV 时，用模板 SRV 的端口，把目标域名前缀替换成当前子域名。
   const portalDomain = String(config.portalDomain || "").toLowerCase();
   if (!portalDomain || !hostname.endsWith(`.${portalDomain}`)) return null;
 
@@ -490,6 +612,7 @@ function handlePortalSubdomainFallback(hostname, config, records) {
 }
 
 async function handleSrvRedirect(request, config) {
+  // 非门户域名入口：优先精确 SRV，找不到时尝试单层子域名的模板跳转。
   const url = new URL(request.url);
   const hostname = url.hostname.toLowerCase();
   const managedRecords = getManagedSrvRecords(config);
@@ -508,7 +631,7 @@ async function handleSrvRedirect(request, config) {
   }
   const bestSrv = records[0];
   const { isWeb, scheme } = determineIfWebService(bestSrv.service, bestSrv.protocol);
-  if (!isWeb) return buildNonWebResponse(bestSrv, config.debugMode);
+  if (!isWeb) return buildNonWebResponse(bestSrv, config);
   const status = globalThis.customRedirectModes[hostname] || config.defaultRedirectStatus;
   return new Response(null, { status, headers: { Location: `${scheme}://${bestSrv.target}:${bestSrv.port}${url.pathname}${url.search}`, "Cache-Control": "no-store" } });
 }
@@ -517,14 +640,15 @@ function compareSrvForRedirect(a, b) {
   const bWeb = determineIfWebService(b.service, b.protocol).isWeb ? 0 : 1;
   return aWeb - bWeb || a.priority - b.priority || b.weight - a.weight || compareSrvFreshness(a, b);
 }
-function buildNonWebResponse(srv, debugMode) {
+function buildNonWebResponse(srv, config = {}) {
   const localLink = getLocalSchemeLink(srv.service, srv.protocol, srv.target, srv.port);
-  const linkPart = localLink ? `<a class="link" href="${escapeAttribute(localLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(localLink)}</a>` : `<span>${escapeHtml(srv.target)}:${srv.port}</span>`;
-  const debugInfo = debugMode && srv.raw ? `<section class="debug"><h2>DEBUG</h2><pre>${escapeHtml(JSON.stringify(srv.raw, null, 2))}</pre></section>` : "";
-  return htmlResponse(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>服务信息</title><style>${getModernCss()}</style></head><body><main class="shell shell-narrow"><section class="panel"><p class="eyebrow">Non-Web Service</p><h1>${escapeHtml(srv.hostname)}</h1><dl class="detail-list"><div><dt>服务</dt><dd>${escapeHtml(srv.service)}</dd></div><div><dt>协议</dt><dd>${escapeHtml(srv.protocol)}</dd></div><div><dt>目标</dt><dd>${escapeHtml(srv.target)}</dd></div><div><dt>端口</dt><dd><code>${srv.port}</code></dd></div><div><dt>链接</dt><dd>${linkPart}</dd></div></dl></section>${debugInfo}</main></body></html>`);
+  const linkPart = localLink ? `<a class="break-all text-sm font-semibold text-amber-200 underline decoration-amber-300/50 underline-offset-4 hover:text-amber-100" href="${escapeAttribute(localLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(localLink)}</a>` : `<span class="break-all text-zinc-200">${escapeHtml(srv.target)}:${srv.port}</span>`;
+  const debugInfo = config.debugMode && srv.raw ? `<section class="rounded-2xl border border-amber-300/15 bg-zinc-900/90 p-4 shadow-lg shadow-black/20"><h2 class="text-sm font-semibold text-amber-200">DEBUG</h2><pre class="mt-3 max-h-96 overflow-auto rounded-xl border border-amber-300/10 bg-black/60 p-4 text-xs leading-5 text-zinc-300">${escapeHtml(JSON.stringify(srv.raw, null, 2))}</pre></section>` : "";
+  return htmlResponse(`<!doctype html><html lang="zh-CN">${getPageHead("服务信息", config)}<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"><main class="mx-auto flex min-h-screen w-full max-w-2xl flex-col justify-center gap-4 px-4 py-8"><section class="rounded-3xl border border-amber-300/20 bg-zinc-900/90 p-6 shadow-2xl shadow-black/50 ring-1 ring-white/5"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">Non-Web Service</p><h1 class="mt-2 break-all text-2xl font-bold tracking-tight text-zinc-50">${escapeHtml(srv.hostname)}</h1><dl class="mt-6 grid gap-3 text-sm"><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">服务</dt><dd class="font-medium text-zinc-100">${escapeHtml(srv.service)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">协议</dt><dd class="font-medium text-zinc-100">${escapeHtml(srv.protocol)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">目标</dt><dd class="break-all font-medium text-zinc-100">${escapeHtml(srv.target)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">端口</dt><dd><code class="rounded-lg border border-amber-300/15 bg-black/30 px-2 py-1 font-mono text-sm font-semibold text-amber-200">${srv.port}</code></dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">链接</dt><dd class="min-w-0">${linkPart}</dd></div></dl></section>${debugInfo}</main></body></html>`);
 }
 
 function determineIfWebService(service, protocol) {
+  // 只有 Web 类 SRV 执行 HTTP 重定向；SSH/RDP/FTP 等返回服务信息页和本地协议链接。
   const s = (service || "").toLowerCase();
   const p = (protocol || "").toLowerCase();
   let scheme = "http";
@@ -565,135 +689,3 @@ function jsonResponse(data, status = 200) { return new Response(JSON.stringify(d
 function textResponse(text, status = 200) { return new Response(text, { status, headers: { "Content-Type": "text/plain; charset=UTF-8", "Cache-Control": "no-store" } }); }
 function escapeAttribute(value) { return escapeHtml(String(value || "")); }
 function escapeHtml(value) { return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
-
-function getModernCss() {
-  return `
-:root {
-  color-scheme: light;
-  --bg: #f6f8fb;
-  --surface: #ffffff;
-  --surface-soft: #f9fbfd;
-  --text: #172033;
-  --muted: #667085;
-  --line: #dbe3ec;
-  --line-soft: #edf1f6;
-  --accent: #0f766e;
-  --accent-strong: #0b5f59;
-  --accent-soft: #e7f5f3;
-  --blue-soft: #eef6ff;
-  --warn-bg: #fff8e6;
-  --warn-text: #7a5200;
-  --shadow: 0 14px 36px rgba(20, 31, 48, 0.08);
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  min-height: 100vh;
-  background: radial-gradient(circle at 20% 0%, #ffffff 0, #f6f8fb 34%, #eef3f8 100%);
-  color: var(--text);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
-  letter-spacing: 0;
-}
-a { color: var(--accent-strong); }
-.shell { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 30px 0 36px; }
-.topbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
-.eyebrow { margin: 0 0 5px; color: var(--accent-strong); font-size: 0.74rem; font-weight: 760; text-transform: uppercase; }
-h1 { margin: 0; font-size: 2.35rem; line-height: 1.08; font-weight: 780; }
-h2 { margin: 0; font-size: 1rem; line-height: 1.3; }
-.stats { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.stats span { display: inline-flex; align-items: baseline; gap: 4px; min-height: 34px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,0.82); color: var(--muted); box-shadow: 0 4px 14px rgba(20,31,48,0.04); white-space: nowrap; }
-.stats strong { color: var(--text); font-weight: 760; }
-.table-panel, .resource-card, .auth-card, .debug, .empty, .alert { border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,0.9); box-shadow: var(--shadow); }
-.alert, .debug, .empty, .notice { padding: 14px 16px; margin: 12px 0; }
-.alert { background: var(--warn-bg); color: var(--warn-text); border-color: #f0ddaa; }
-.notice { border: 1px solid #b8e1d9; border-radius: 8px; background: #ecfdf9; color: #075e54; box-shadow: 0 8px 22px rgba(20,31,48,0.05); }
-.toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0 0 12px; }
-.search-box { flex: 1; display: grid; grid-template-columns: auto minmax(220px, 420px); justify-content: end; align-items: center; gap: 10px; color: var(--muted); }
-.search-box input { min-height: 40px; border: 1px solid var(--line); border-radius: 8px; padding: 0 13px; font: inherit; color: var(--text); background: rgba(255,255,255,0.92); outline: none; }
-.search-box input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(15,118,110,0.12); }
-.table-panel { overflow-x: auto; overflow-y: hidden; }
-table { width: 100%; min-width: 1060px; border-collapse: collapse; table-layout: fixed; }
-.col-domain { width: 16%; }
-.col-service { width: 10%; }
-.col-target { width: 14%; }
-.col-port { width: 7%; }
-.col-time { width: 13%; }
-.col-link { width: 16%; }
-.col-action { width: 14%; }
-.col-refresh { width: 10%; }
-th, td { border-bottom: 1px solid var(--line-soft); text-align: left; vertical-align: middle; }
-th { height: 46px; padding: 0 14px; background: #f1f5f9; color: #475467; font-size: 0.78rem; font-weight: 740; }
-td { height: 68px; padding: 10px 14px; font-size: 0.94rem; }
-tbody tr { background: rgba(255,255,255,0.72); }
-tbody tr:hover { background: #fbfdff; }
-tbody tr:last-child td { border-bottom: 0; }
-.domain, .host, .link { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.domain { font-weight: 720; color: #111827; }
-.host { color: #243246; }
-.link { font-weight: 680; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-.service-pill { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border: 1px solid #cfd9e6; border-radius: 999px; background: var(--blue-soft); color: #344054; font-size: 0.9rem; white-space: nowrap; }
-.protocol { margin-left: 7px; color: var(--muted); white-space: nowrap; }
-code { display: inline-flex; align-items: center; height: 24px; padding: 0 7px; border-radius: 7px; background: #eef3f7; color: #172033; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.93rem; }
-.time, .muted { color: var(--muted); }
-.redirect-form { display: grid; grid-template-columns: minmax(62px, 1fr) 44px; gap: 6px; align-items: center; }
-.refresh-form { margin: 0; }
-select, input[type="password"] { min-height: 38px; width: 100%; border: 1px solid #cfd9e6; border-radius: 8px; background: #fff; color: var(--text); font: inherit; outline: none; }
-select { padding: 0 9px; }
-input[type="password"] { padding: 0 12px; }
-select:focus, input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(15,118,110,0.12); }
-.btn { min-height: 38px; border: 0; border-radius: 8px; padding: 0 14px; background: var(--accent); color: #fff; font: inherit; font-weight: 720; cursor: pointer; }
-.btn:hover { background: var(--accent-strong); }
-.btn:disabled, .icon-btn:disabled { opacity: 0.58; cursor: wait; }
-.btn-sm { min-height: 36px; padding: 0 8px; }
-.icon-btn { min-height: 36px; width: 100%; border: 1px solid #b8e1d9; border-radius: 8px; background: #ecfdf9; color: var(--accent-strong); font: inherit; font-weight: 720; cursor: pointer; }
-.icon-btn:hover { background: #d9f8f1; }
-.btn-block { width: 100%; }
-.mobile-list { display: none; }
-.resource-card { padding: 14px; }
-.card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-.card-head p { margin: 5px 0 0; color: var(--muted); overflow-wrap: anywhere; }
-dl { margin: 14px 0 0; display: grid; gap: 8px; }
-dl div { display: grid; grid-template-columns: 54px minmax(0,1fr); gap: 10px; }
-dt { color: var(--muted); }
-dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-.card-actions { margin-top: 14px; }
-.debug pre { margin: 10px 0 0; white-space: pre-wrap; overflow: auto; }
-.refresh-card { position: fixed; right: 22px; bottom: 22px; z-index: 20; display: grid; grid-template-columns: 34px minmax(0, 1fr) 28px; gap: 12px; align-items: center; width: min(420px, calc(100vw - 32px)); padding: 14px; border: 1px solid #b8e1d9; border-radius: 8px; background: rgba(255,255,255,0.96); box-shadow: 0 18px 46px rgba(20,31,48,0.18); }
-.refresh-card[hidden] { display: none; }
-.refresh-copy strong { display: block; font-size: 0.98rem; }
-.refresh-copy p { margin: 4px 0 0; color: var(--muted); line-height: 1.45; }
-.refresh-close { width: 28px; height: 28px; border: 0; border-radius: 7px; background: #f1f5f9; color: var(--muted); font-size: 1.2rem; line-height: 1; cursor: pointer; }
-.spinner { width: 28px; height: 28px; border: 3px solid #d9f8f1; border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; }
-.refresh-card.is-done .spinner { animation: none; border-color: var(--accent); background: var(--accent-soft); }
-@keyframes spin { to { transform: rotate(360deg); } }
-.auth-page { background: #f5f7fa; }
-.auth-shell { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-.auth-card { width: min(360px, 100%); padding: 24px; }
-.brand-mark { display: inline-flex; align-items: center; justify-content: center; height: 34px; min-width: 48px; margin-bottom: 14px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-strong); font-weight: 800; }
-.auth-card h1 { font-size: 1.85rem; }
-.auth-form { display: grid; gap: 12px; margin-top: 18px; }
-.form-note { margin: 12px 0 0; color: var(--muted); }
-@media (max-width: 1040px) {
-  .shell { width: min(100% - 24px, 1180px); }
-  .col-time { width: 13%; }
-  .col-link { width: 15%; }
-  .col-action { width: 12%; }
-  .col-refresh { width: 9%; }
-  th, td { padding-left: 10px; padding-right: 10px; }
-}
-@media (max-width: 980px) {
-  .shell { width: min(100% - 28px, 680px); padding-top: 20px; }
-  .topbar { align-items: flex-start; flex-direction: column; }
-  h1 { font-size: 2rem; }
-  .stats { justify-content: flex-start; }
-  .table-panel { display: none; }
-  .mobile-list { display: grid; gap: 12px; }
-  .toolbar { display: block; }
-  .search-box { grid-template-columns: 1fr; justify-content: stretch; }
-  .search-box input { width: 100%; }
-  .redirect-form { grid-template-columns: minmax(0,1fr) 64px; }
-  .card-actions { display: grid; grid-template-columns: minmax(0,1fr) 88px; gap: 10px; align-items: center; }
-  .refresh-card { left: 14px; right: 14px; bottom: 14px; width: auto; }
-}
-`;
-}

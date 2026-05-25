@@ -38,6 +38,7 @@ https://newapi.s.example.com/ -> https://newapi.n.example.com:2424/
 The portal includes:
 
 - Search over domain, service, target, and port.
+- A Tailwind CDN-only UI; the Worker does not inline custom CSS.
 - Browser-timezone rendering for record timestamps.
 - Redirect status selection per domain in Worker memory.
 - Manual refresh button that writes a TXT queue message and polls `/api/resources?force=1` until the port changes.

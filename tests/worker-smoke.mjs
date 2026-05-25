@@ -79,8 +79,26 @@ globalThis.fetch = async (url, init = {}) => {
 
 const portal = await worker.fetch(new Request("https://s.example.com/?pwd=secret"), env, {});
 const html = await portal.text();
-for (const needle of ["resourceSearch", "refresh-card", "浏览器时区", "data-time=\"2026-05-26T"]) {
+for (const needle of ["tailwindcss-browser", "resourceSearch", "refresh-card", "浏览器时区", "data-time=\"2026-05-26T"]) {
   if (!html.includes(needle)) throw new Error(`portal missing ${needle}`);
+}
+if (html.includes("<style") || html.includes("style=")) throw new Error("portal should use Tailwind CDN without inline styles");
+if (!html.includes("bg-zinc-950") || !html.includes("text-amber-") || !html.includes("redirect-confirm") || !html.includes("确认跳转状态")) {
+  throw new Error("portal missing black-gold Tailwind UI or redirect confirmation");
+}
+if (html.includes("window.confirm")) throw new Error("redirect status should use the Tailwind confirmation overlay");
+if (html.includes(">保存</button>")) throw new Error("redirect status should not render a save button");
+
+const auth = await worker.fetch(new Request("https://s.example.com/"), env, {});
+const authHtml = await auth.text();
+if (!authHtml.includes("tailwindcss-browser") || authHtml.includes("<style") || authHtml.includes("style=")) {
+  throw new Error("auth page should use Tailwind CDN without inline styles");
+}
+
+const nonWeb = await worker.fetch(new Request("https://hm-hy2.s.example.com/"), env, {});
+const nonWebHtml = await nonWeb.text();
+if (!nonWebHtml.includes("tailwindcss-browser") || nonWebHtml.includes("<style") || nonWebHtml.includes("style=")) {
+  throw new Error("non-web page should use Tailwind CDN without inline styles");
 }
 
 const exactWeb = await worker.fetch(new Request("https://web.s.example.com/app?x=1"), env, {});

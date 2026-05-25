@@ -75,13 +75,14 @@ Only template targets beginning with `web.` or `portal.` are rewritten. Cloudfla
 | `PORTAL_DOMAIN` | yes | first wildcard parent or first domain | Hostname that serves the portal and JSON APIs. |
 | `CF_API_TOKEN` | yes for portal scan and refresh | none | Cloudflare API token with DNS edit/read permission for the zone. |
 | `CF_ZONE_ID` | yes for portal scan and refresh | none | Cloudflare zone id. |
-| `PORTAL_PASSWD` | recommended | `11111111` | Portal/API password. |
+| `PORTAL_PASSWD` | recommended | `ABCCBA` | Portal/API password. Set this explicitly in production. |
 | `DEFAULT_REDIRECT_STATUS` | no | `302` | One of `301`, `302`, `307`, `308`. |
 | `CACHE_TTL_SECONDS` | no | `300` | Worker in-memory SRV cache TTL for non-forced reads. |
 | `SRV_MAX_AGE_SECONDS` | no | `0` | Ignore SRV records older than this value. `0` disables age filtering. |
 | `NATMAP_REFRESH_QUEUE_NAME` | no | `_natmap-refresh.<PORTAL_DOMAIN>` | TXT record name used as the refresh queue. |
 | `WILDCARD_TEMPLATE_HOSTNAME` | no | `web.<PORTAL_DOMAIN>` | Web SRV hostname used when a single-label portal subdomain has no exact SRV. |
 | `WILDCARD_TEMPLATE_TARGET_PREFIXES` | no | `web,portal` | Comma-separated target prefixes that may be replaced by the requested subdomain. |
+| `TAILWIND_CDN_URL` | no | BootCDN Tailwind browser build | Tailwind CDN URL used by the Worker UI. Set to another accelerated mirror if needed. |
 | `DEBUG_MODE` | no | `false` | Include debug blocks in portal responses. |
 
 ## OpenWrt Runtime Variables
