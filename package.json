@@ -1,0 +1,14 @@
+{
+  "name": "dns-srv-to-redirection",
+  "version": "0.2.0",
+  "description": "Cloudflare Worker portal and OpenWrt natmap helper for SRV-based service publishing.",
+  "type": "module",
+  "scripts": {
+    "check": "node --check worker.js",
+    "test": "node --check worker.js && node tests/worker-smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

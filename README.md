@@ -1,0 +1,108 @@
+# DNS SRV to Redirection
+
+Cloudflare Worker + OpenWrt natmap companion for publishing NAT-mapped services through Cloudflare SRV records.
+
+It provides:
+
+- A password-protected web portal that lists Cloudflare SRV records for managed domains.
+- Redirects for web services based on SRV targets and ports.
+- A manual "refresh port" action that asks OpenWrt natmap to restart one matching section.
+- A natmap agent that polls a DNS TXT refresh queue, performs health checks, and restarts unhealthy sections.
+- A Cloudflare DDNS script that replaces old same-name records before adding new records, avoiding duplicate stale SRV entries.
+
+## Repository Layout
+
+```text
+worker.js                         Cloudflare Worker entrypoint
+openwrt/natmap-portal-agent.sh    natmap custom_script agent
+openwrt/ddns/Cloudflare           natmap DDNS script for Cloudflare
+scripts/deploy-worker.sh          Worker deploy helper
+scripts/install-openwrt.sh        OpenWrt script installer
+scripts/smoke-test.sh             basic live smoke checks
+tests/worker-smoke.mjs            local Worker regression smoke test
+docs/                            architecture, install, runbook, API, verification records
+```
+
+## Quick Start
+
+1. Deploy the Worker.
+
+```sh
+cp wrangler.toml.example wrangler.toml
+# Edit wrangler.toml vars, then set secrets:
+npx wrangler secret put CF_API_TOKEN
+npx wrangler secret put CF_ZONE_ID
+npx wrangler deploy worker.js
+```
+
+2. Install OpenWrt scripts.
+
+```sh
+OPENWRT_HOST=wrt OPENWRT_QUEUE_NAME=_natmap-refresh.s.example.com scripts/install-openwrt.sh
+```
+
+3. Bind the agent to exactly one natmap section custom script.
+
+```sh
+ssh wrt 'uci set natmap.@natmap[0].custom_script=/etc/natmap/natmap-portal-agent.sh && uci commit natmap && /etc/init.d/natmap restart'
+```
+
+4. Open the portal.
+
+```text
+https://<PORTAL_DOMAIN>/?pwd=<PORTAL_PASSWD>
+```
+
+## Worker Environment Variables
+
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `DOMAINS` | yes | none | Comma-separated managed domains. Wildcards are supported, for example `*.s.example.com`. |
+| `PORTAL_DOMAIN` | yes | first wildcard parent or first domain | Hostname that serves the portal and JSON APIs. |
+| `CF_API_TOKEN` | yes for portal scan and refresh | none | Cloudflare API token with DNS edit/read permission for the zone. |
+| `CF_ZONE_ID` | yes for portal scan and refresh | none | Cloudflare zone id. |
+| `PORTAL_PASSWD` | recommended | `11111111` | Portal/API password. |
+| `DEFAULT_REDIRECT_STATUS` | no | `302` | One of `301`, `302`, `307`, `308`. |
+| `CACHE_TTL_SECONDS` | no | `300` | Worker in-memory SRV cache TTL for non-forced reads. |
+| `SRV_MAX_AGE_SECONDS` | no | `0` | Ignore SRV records older than this value. `0` disables age filtering. |
+| `NATMAP_REFRESH_QUEUE_NAME` | no | `_natmap-refresh.<PORTAL_DOMAIN>` | TXT record name used as the refresh queue. |
+| `DEBUG_MODE` | no | `false` | Include debug blocks in portal responses. |
+
+## OpenWrt Runtime Variables
+
+The agent works with defaults, but these can be exported before running it:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `NATMAP_REFRESH_QUEUE_NAME` | `_natmap-refresh.example.com` | TXT name to poll. Set this to the same value as Worker `NATMAP_REFRESH_QUEUE_NAME`. |
+| `NATMAP_REFRESH_INTERVAL` | `30` | Refresh queue polling interval in seconds. |
+| `NATMAP_HEALTH_INTERVAL` | `300` | Health check interval in seconds. |
+| `NATMAP_HEALTH_FAIL_THRESHOLD` | `2` | Consecutive failures before restarting a section. |
+| `NATMAP_HEALTH_TIMEOUT` | `4` | Probe timeout in seconds. |
+| `NATMAP_REFRESH_MAX_AGE_MS` | `900000` | Ignore stale refresh TXT messages older than this age. |
+| `NATMAP_PORTAL_VERBOSE` | `0` | Print logs to stdout as well as `logger`. |
+
+## Safety Notes
+
+- OpenWrt refresh polling reads TXT through system DNS (`nslookup`); it does not use Cloudflare API tokens.
+- Worker force-refresh and manual refresh APIs require the portal password and have in-memory rate limits.
+- Manual browser refresh after clicking "refresh port" does not repeat the action; POST fallback uses `303 See Other`.
+- UDP services are not generically probeable. Add service-specific scripts under `/etc/natmap/health.d/` for HY2, QUIC, game protocols, and similar services.
+
+## Documentation
+
+- [Installation](docs/INSTALL.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [API Reference](docs/API.md)
+- [Operations Runbook](docs/RUNBOOK.md)
+- [Verification Record](docs/VERIFICATION.md)
+- [Security Notes](docs/SECURITY.md)
+- [Changelog](CHANGELOG.md)
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+```sh
+scripts/deploy-all.sh
+```

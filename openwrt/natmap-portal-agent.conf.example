@@ -1,0 +1,8 @@
+# Copy to /etc/natmap/natmap-portal-agent.conf on OpenWrt.
+# Keep this value identical to the Worker NATMAP_REFRESH_QUEUE_NAME variable.
+NATMAP_REFRESH_QUEUE_NAME='_natmap-refresh.s.example.com'
+# NATMAP_REFRESH_INTERVAL=30
+# NATMAP_HEALTH_INTERVAL=300
+# NATMAP_HEALTH_FAIL_THRESHOLD=2
+# NATMAP_HEALTH_TIMEOUT=4
+# NATMAP_REFRESH_MAX_AGE_MS=900000
