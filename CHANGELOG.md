@@ -10,6 +10,7 @@
 - OpenWrt natmap portal agent for TXT queue polling and health maintenance.
 - OpenWrt Cloudflare DDNS script that deletes old same-name records before creating replacements.
 - Deployment helpers, smoke tests, and complete project documentation.
+- Wildcard dynamic redirects that reuse a configurable Web SRV template, defaulting to `web.<PORTAL_DOMAIN>`, for single-label portal subdomains without exact SRV records.
 
 ### Changed
 

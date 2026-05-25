@@ -26,6 +26,15 @@ The Worker has two modes based on request hostname:
 
 The Worker fetches Cloudflare SRV records, normalizes them, filters them by `DOMAINS`, and deduplicates same `hostname|service|protocol` entries by newest Cloudflare timestamp.
 
+## Wildcard Dynamic Redirects
+
+Redirect handling prefers exact SRV hostnames. If no exact SRV exists, and the requested hostname is one label under `PORTAL_DOMAIN`, the Worker looks for a Web SRV template. The default template hostname is `web.<PORTAL_DOMAIN>` for compatibility with the original project, and it can be overridden with `WILDCARD_TEMPLATE_HOSTNAME`. When that template target begins with one of `WILDCARD_TEMPLATE_TARGET_PREFIXES` (`web,portal` by default), the prefix is replaced with the requested subdomain and the template port is reused.
+
+```text
+_http._tls.web.s.example.com -> web.n.example.com:2424
+https://newapi.s.example.com/ -> https://newapi.n.example.com:2424/
+```
+
 The portal includes:
 
 - Search over domain, service, target, and port.

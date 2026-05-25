@@ -27,10 +27,42 @@ function srvRecord() {
   };
 }
 
+function webSrvRecord() {
+  return {
+    id: "srv-web",
+    name: "_http._tls.web.s.example.com",
+    type: "SRV",
+    created_on: "2026-05-26T00:00:00Z",
+    modified_on: "2026-05-26T00:01:00Z",
+    data: {
+      priority: 0,
+      weight: 0,
+      port: 2424,
+      target: "web.n.example.com",
+    },
+  };
+}
+
+function portalSrvRecord() {
+  return {
+    id: "srv-portal",
+    name: "_http._tls.portal.s.example.com",
+    type: "SRV",
+    created_on: "2026-05-26T00:00:00Z",
+    modified_on: "2026-05-26T00:02:00Z",
+    data: {
+      priority: 0,
+      weight: 0,
+      port: 3434,
+      target: "portal.n.example.com",
+    },
+  };
+}
+
 globalThis.fetch = async (url, init = {}) => {
   const u = new URL(url);
   if (u.searchParams.get("type") === "SRV") {
-    return Response.json({ success: true, result: [srvRecord()], result_info: { page: 1, total_pages: 1 } });
+    return Response.json({ success: true, result: [srvRecord(), webSrvRecord(), portalSrvRecord()], result_info: { page: 1, total_pages: 1 } });
   }
   if (u.searchParams.get("type") === "TXT") {
     return Response.json({ success: true, result: [] });
@@ -49,6 +81,28 @@ const portal = await worker.fetch(new Request("https://s.example.com/?pwd=secret
 const html = await portal.text();
 for (const needle of ["resourceSearch", "refresh-card", "浏览器时区", "data-time=\"2026-05-26T"]) {
   if (!html.includes(needle)) throw new Error(`portal missing ${needle}`);
+}
+
+const exactWeb = await worker.fetch(new Request("https://web.s.example.com/app?x=1"), env, {});
+if (exactWeb.status !== 307 || exactWeb.headers.get("Location") !== "https://web.n.example.com:2424/app?x=1") {
+  throw new Error("exact web SRV redirect mismatch");
+}
+
+const wildcardWeb = await worker.fetch(new Request("https://newapi.s.example.com/path?q=1"), env, {});
+if (wildcardWeb.status !== 307 || wildcardWeb.headers.get("Location") !== "https://newapi.n.example.com:2424/path?q=1") {
+  throw new Error("wildcard portal subdomain redirect mismatch");
+}
+
+const nestedWildcard = await worker.fetch(new Request("https://deep.newapi.s.example.com/path"), env, {});
+if (nestedWildcard.status !== 404) throw new Error("nested wildcard fallback should not trigger");
+
+const customTemplate = await worker.fetch(new Request("https://console.s.example.com/ui"), {
+  ...env,
+  WILDCARD_TEMPLATE_HOSTNAME: "portal.s.example.com",
+  WILDCARD_TEMPLATE_TARGET_PREFIXES: "portal",
+}, {});
+if (customTemplate.status !== 307 || customTemplate.headers.get("Location") !== "https://console.n.example.com:3434/ui") {
+  throw new Error("custom wildcard template redirect mismatch");
 }
 
 const api1 = await worker.fetch(new Request("https://s.example.com/api/resources?pwd=secret&force=1"), env, {});

@@ -35,6 +35,8 @@ function initConfig(env) {
     cacheTtl: parsePositiveInt(env.CACHE_TTL_SECONDS, 300),
     srvMaxAgeSeconds: parsePositiveInt(env.SRV_MAX_AGE_SECONDS, 0),
     refreshQueueName: (env.NATMAP_REFRESH_QUEUE_NAME || `_natmap-refresh.${portalDomain}`).trim().toLowerCase(),
+    wildcardTemplateHostname: normalizeHostname(env.WILDCARD_TEMPLATE_HOSTNAME || `web.${portalDomain}`),
+    wildcardTemplateTargetPrefixes: parseCsv(env.WILDCARD_TEMPLATE_TARGET_PREFIXES || "web,portal"),
   };
 }
 
@@ -45,6 +47,12 @@ function parseRedirectStatus(value, fallback) {
 function parsePositiveInt(value, fallback) {
   const parsed = parseInt(value, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+function normalizeHostname(value) {
+  return String(value || "").trim().replace(/\.$/, "").toLowerCase();
+}
+function parseCsv(value) {
+  return String(value || "").split(",").map((item) => item.trim().replace(/\.+$/, "").toLowerCase()).filter(Boolean);
 }
 function initSrvCacheIfEmpty() {
   if (!globalThis.srvRecordsCache) {
@@ -456,11 +464,48 @@ async function enqueueNatmapRefresh(domain, config) {
   return saveJson.success ? { ok: true } : { ok: false, error: "Cloudflare TXT 写入失败" };
 }
 
+function handlePortalSubdomainFallback(hostname, config, records) {
+  const portalDomain = String(config.portalDomain || "").toLowerCase();
+  if (!portalDomain || !hostname.endsWith(`.${portalDomain}`)) return null;
+
+  const subdomain = hostname.slice(0, -(portalDomain.length + 1));
+  if (!subdomain || subdomain.includes(".")) return null;
+
+  const templateHostname = config.wildcardTemplateHostname || `web.${portalDomain}`;
+  const templateSrv = records
+    .filter((record) => record.hostname === templateHostname && determineIfWebService(record.service, record.protocol).isWeb)
+    .sort(compareSrvForRedirect)[0];
+  if (!templateSrv) return null;
+
+  const prefixes = config.wildcardTemplateTargetPrefixes?.length ? config.wildcardTemplateTargetPrefixes : ["web", "portal"];
+  const targetPrefix = new RegExp(`^(?:${prefixes.map(escapeRegExp).join("|")})\\.`, "i");
+  if (!targetPrefix.test(templateSrv.target)) return null;
+
+  const { scheme } = determineIfWebService(templateSrv.service, templateSrv.protocol);
+  return {
+    scheme,
+    target: templateSrv.target.replace(targetPrefix, `${subdomain}.`),
+    port: templateSrv.port,
+  };
+}
+
 async function handleSrvRedirect(request, config) {
   const url = new URL(request.url);
   const hostname = url.hostname.toLowerCase();
-  const records = getManagedSrvRecords(config).filter((r) => r.hostname === hostname).sort(compareSrvForRedirect);
-  if (!records.length) return textResponse(`No SRV record found for ${hostname}.`, 404);
+  const managedRecords = getManagedSrvRecords(config);
+  const records = managedRecords.filter((r) => r.hostname === hostname).sort(compareSrvForRedirect);
+  if (!records.length) {
+    const fallback = handlePortalSubdomainFallback(hostname, config, managedRecords);
+    if (!fallback) return textResponse(`No SRV record found for ${hostname}.`, 404);
+    const status = globalThis.customRedirectModes[hostname] || config.defaultRedirectStatus;
+    return new Response(null, {
+      status,
+      headers: {
+        Location: `${fallback.scheme}://${fallback.target}:${fallback.port}${url.pathname}${url.search}`,
+        "Cache-Control": "no-store",
+      },
+    });
+  }
   const bestSrv = records[0];
   const { isWeb, scheme } = determineIfWebService(bestSrv.service, bestSrv.protocol);
   if (!isWeb) return buildNonWebResponse(bestSrv, config.debugMode);
@@ -499,6 +544,9 @@ function getLocalSchemeLink(service, protocol, target, port) {
 function wildcardToRegex(wildcard) {
   const escaped = wildcard.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
   return new RegExp(`^${escaped}$`, "i");
+}
+function escapeRegExp(value) {
+  return String(value).replace(/[.+?^${}()|[\]\\]/g, "\\$&");
 }
 function formatRecordTime(timestamp) {
   if (!timestamp) return "未知";

@@ -6,6 +6,7 @@ It provides:
 
 - A password-protected web portal that lists Cloudflare SRV records for managed domains.
 - Redirects for web services based on SRV targets and ports.
+- Wildcard dynamic redirects using a configurable template Web service.
 - A manual "refresh port" action that asks OpenWrt natmap to restart one matching section.
 - A natmap agent that polls a DNS TXT refresh queue, performs health checks, and restarts unhealthy sections.
 - A Cloudflare DDNS script that replaces old same-name records before adding new records, avoiding duplicate stale SRV entries.
@@ -53,6 +54,19 @@ ssh wrt 'uci set natmap.@natmap[0].custom_script=/etc/natmap/natmap-portal-agent
 https://<PORTAL_DOMAIN>/?pwd=<PORTAL_PASSWD>
 ```
 
+## Wildcard Dynamic Redirects
+
+The Worker first looks for an exact SRV hostname match. If none exists and the request hostname is a single-label subdomain under `PORTAL_DOMAIN`, it can reuse a Web SRV record as a template. The default template is `web.<PORTAL_DOMAIN>`, matching the original project behavior.
+
+Example with `PORTAL_DOMAIN=s.example.com`:
+
+```text
+_http._tls.web.s.example.com -> web.n.example.com:2424
+https://newapi.s.example.com/path -> https://newapi.n.example.com:2424/path
+```
+
+Only template targets beginning with `web.` or `portal.` are rewritten. Cloudflare still needs to route the requested hostname to this Worker, usually through an appropriate Worker custom domain or wildcard route.
+
 ## Worker Environment Variables
 
 | Variable | Required | Default | Purpose |
@@ -66,6 +80,8 @@ https://<PORTAL_DOMAIN>/?pwd=<PORTAL_PASSWD>
 | `CACHE_TTL_SECONDS` | no | `300` | Worker in-memory SRV cache TTL for non-forced reads. |
 | `SRV_MAX_AGE_SECONDS` | no | `0` | Ignore SRV records older than this value. `0` disables age filtering. |
 | `NATMAP_REFRESH_QUEUE_NAME` | no | `_natmap-refresh.<PORTAL_DOMAIN>` | TXT record name used as the refresh queue. |
+| `WILDCARD_TEMPLATE_HOSTNAME` | no | `web.<PORTAL_DOMAIN>` | Web SRV hostname used when a single-label portal subdomain has no exact SRV. |
+| `WILDCARD_TEMPLATE_TARGET_PREFIXES` | no | `web,portal` | Comma-separated target prefixes that may be replaced by the requested subdomain. |
 | `DEBUG_MODE` | no | `false` | Include debug blocks in portal responses. |
 
 ## OpenWrt Runtime Variables
