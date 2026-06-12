@@ -2,12 +2,7 @@
 
 ## Secrets
 
-Do not commit Cloudflare API tokens, zone ids, or portal passwords. Use Wrangler secrets for Cloudflare values:
-
-```sh
-npx wrangler secret put CF_API_TOKEN
-npx wrangler secret put CF_ZONE_ID
-```
+Do not commit Cloudflare API tokens, zone ids, or portal passwords. Copy `.secrets.example` to `.secrets` for local deployment secrets; `.secrets` is ignored by git. `scripts/deploy-worker.sh` uploads configured Worker secrets through Wrangler before deploying.
 
 OpenWrt DDNS tokens stay in natmap UCI config. The refresh/health agent does not read Cloudflare tokens; it reads the refresh queue via DNS TXT lookup.
 

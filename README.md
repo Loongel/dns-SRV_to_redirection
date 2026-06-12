@@ -6,6 +6,7 @@ It provides:
 
 - A password-protected web portal that lists Cloudflare SRV records for managed domains.
 - Redirects for web services based on SRV targets and ports.
+- Treats `_vless_FB` SRV services as independent HTTPS fallback redirect endpoints.
 - Wildcard dynamic redirects using a configurable template Web service.
 - A manual "refresh port" action that asks OpenWrt natmap to restart one matching section.
 - A natmap agent that polls a DNS TXT refresh queue, performs health checks, and restarts unhealthy sections.
@@ -30,10 +31,9 @@ docs/                            architecture, install, runbook, API, verificati
 
 ```sh
 cp wrangler.toml.example wrangler.toml
-# Edit wrangler.toml vars, then set secrets:
-npx wrangler secret put CF_API_TOKEN
-npx wrangler secret put CF_ZONE_ID
-npx wrangler deploy worker.js
+cp .secrets.example .secrets
+# Edit wrangler.toml public vars and .secrets private values, then deploy:
+scripts/deploy-worker.sh
 ```
 
 2. Install OpenWrt scripts.
@@ -74,8 +74,8 @@ Only template targets beginning with `web.` or `portal.` are rewritten. Cloudfla
 | `DOMAINS` | yes | none | Comma-separated managed domains. Wildcards are supported, for example `*.s.example.com`. |
 | `PORTAL_DOMAIN` | yes | first wildcard parent or first domain | Hostname that serves the portal and JSON APIs. |
 | `CF_API_TOKEN` | yes for portal scan and refresh | none | Cloudflare API token with DNS edit/read permission for the zone. |
-| `CF_ZONE_ID` | yes for portal scan and refresh | none | Cloudflare zone id. |
-| `PORTAL_PASSWD` | recommended | `ABCCBA` | Portal/API password. Set this explicitly in production. |
+| `CF_ZONE_ID` | yes for portal scan and refresh | none | Cloudflare zone id. Prefer storing it in `.secrets`. |
+| `PORTAL_PASSWD` | recommended | `ABCCBA` | Portal/API password. Prefer storing it in `.secrets` as a Worker secret. |
 | `DEFAULT_REDIRECT_STATUS` | no | `302` | One of `301`, `302`, `307`, `308`. |
 | `CACHE_TTL_SECONDS` | no | `300` | Worker in-memory SRV cache TTL for non-forced reads. |
 | `SRV_MAX_AGE_SECONDS` | no | `0` | Ignore SRV records older than this value. `0` disables age filtering. |
@@ -84,6 +84,10 @@ Only template targets beginning with `web.` or `portal.` are rewritten. Cloudfla
 | `WILDCARD_TEMPLATE_TARGET_PREFIXES` | no | `web,portal` | Comma-separated target prefixes that may be replaced by the requested subdomain. |
 | `TAILWIND_CDN_URL` | no | BootCDN Tailwind browser build | Tailwind CDN URL used by the Worker UI. Set to another accelerated mirror if needed. |
 | `DEBUG_MODE` | no | `false` | Include debug blocks in portal responses. |
+
+## Local Secrets File
+
+Copy `.secrets.example` to `.secrets` and fill private values. `.secrets` is ignored by git. `scripts/deploy-worker.sh` loads it, uploads `CF_API_TOKEN`, `CF_ZONE_ID`, and `PORTAL_PASSWD` as Worker secrets when present, then runs `wrangler deploy`. `CLOUDFLARE_API_TOKEN` can also be stored there for Wrangler authentication.
 
 ## OpenWrt Runtime Variables
 

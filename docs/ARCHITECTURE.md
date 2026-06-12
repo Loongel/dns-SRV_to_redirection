@@ -22,7 +22,7 @@ OpenWrt natmap
 The Worker has two modes based on request hostname:
 
 - `PORTAL_DOMAIN`: serve the portal and JSON APIs.
-- Any managed SRV hostname: select a matching SRV record and redirect web services.
+- Any managed SRV hostname: select a matching SRV record, redirect HTTP/HTTPS services, and handle `_vless_fb` through its independent HTTPS fallback redirect rule.
 
 The Worker fetches Cloudflare SRV records, normalizes them, filters them by `DOMAINS`, and deduplicates same `hostname|service|protocol` entries by newest Cloudflare timestamp.
 

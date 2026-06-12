@@ -27,26 +27,25 @@ Create a local Wrangler config from the example:
 cp wrangler.toml.example wrangler.toml
 ```
 
-Edit `[vars]` in `wrangler.toml`:
+Edit public `[vars]` in `wrangler.toml`:
 
 ```toml
 DOMAINS = "*.s.example.com"
 PORTAL_DOMAIN = "s.example.com"
-PORTAL_PASSWD = "change-me"
 DEFAULT_REDIRECT_STATUS = "307"
 CACHE_TTL_SECONDS = "300"
 NATMAP_REFRESH_QUEUE_NAME = "_natmap-refresh.s.example.com"
 TAILWIND_CDN_URL = "https://cdn.bootcdn.net/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js"
 ```
 
-Set secrets:
+Create local secrets. `.secrets` is ignored by git:
 
 ```sh
-npx wrangler secret put CF_API_TOKEN
-npx wrangler secret put CF_ZONE_ID
+cp .secrets.example .secrets
+# Fill CF_API_TOKEN, CF_ZONE_ID, PORTAL_PASSWD, and optionally CLOUDFLARE_API_TOKEN.
 ```
 
-Deploy:
+Deploy. The script loads `.secrets`, uploads Worker secrets, then runs Wrangler deploy:
 
 ```sh
 scripts/deploy-worker.sh

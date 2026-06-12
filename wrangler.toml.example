@@ -6,7 +6,6 @@ workers_dev = false
 [vars]
 DOMAINS = "*.s.example.com"
 PORTAL_DOMAIN = "s.example.com"
-PORTAL_PASSWD = "change-me"
 DEFAULT_REDIRECT_STATUS = "307"
 CACHE_TTL_SECONDS = "300"
 SRV_MAX_AGE_SECONDS = "0"
