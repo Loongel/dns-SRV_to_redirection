@@ -8,6 +8,7 @@
  * - 访问门户域名时，展示资源列表、搜索、跳转状态切换、端口刷新按钮。
  * - 端口刷新通过写入一个 Cloudflare TXT 队列记录通知 OpenWrt；OpenWrt 侧由 natmap 自定义脚本轮询该 TXT。
  * - 支持泛域名模板跳转：例如 newapi.s.example.com 可复用 web.s.example.com 的 SRV 端口，并把目标前缀替换为 newapi。
+ * - 支持 _vless_fb 服务类型：表示 VLESS fallback，浏览器访问时按独立 HTTPS fallback 规则重定向。
  *
  * 环境变量说明：
  * - DOMAINS：受管域名匹配列表，逗号分隔，支持通配符；例：*.s.example.com
@@ -25,12 +26,12 @@
  * Secret 示例：
  * - wrangler secret put CF_API_TOKEN
  * - wrangler secret put CF_ZONE_ID
+ * - wrangler secret put PORTAL_PASSWD
  *
  * wrangler.toml 示例：
  * [vars]
  * DOMAINS = "*.s.example.com"
  * PORTAL_DOMAIN = "s.example.com"
- * PORTAL_PASSWD = "change-me"
  * DEFAULT_REDIRECT_STATUS = "302"
  * CACHE_TTL_SECONDS = "300"
  * NATMAP_REFRESH_QUEUE_NAME = "_natmap-refresh.s.example.com"
@@ -304,9 +305,12 @@ function getManagedSrvRecords(config) { return (globalThis.srvRecordsCache?.data
 function matchesManagedDomain(hostname, domainList) { return domainList.some((pattern) => wildcardToRegex(pattern).test(hostname)); }
 function buildResource(record, config) {
   // 将 SRV 原始记录转换成门户直接渲染的数据结构。
-  const { isWeb, scheme } = determineIfWebService(record.service, record.protocol);
-  const link = isWeb ? `${scheme}://${record.target}:${record.port}` : getLocalSchemeLink(record.service, record.protocol, record.target, record.port);
-  return { domain: record.hostname, service: record.service, protocol: record.protocol, target: record.target, port: record.port, link, isWeb, updatedAt: record.updatedAt, updatedIso: record.updatedAt ? new Date(record.updatedAt).toISOString() : "", updatedLabel: formatRecordTime(record.updatedAt), redirectStatus: globalThis.customRedirectModes[record.hostname] || config.defaultRedirectStatus, raw: config.debugMode ? record.raw : undefined };
+  const web = getWebServiceRedirect(record, config);
+  const vlessFallback = getVlessFallbackRedirect(record, config);
+  const redirect = web.isWeb ? web : vlessFallback;
+  const target = redirect.canRedirect ? redirect.target : record.target;
+  const link = redirect.canRedirect ? `${redirect.scheme}://${target}:${record.port}` : getLocalSchemeLink(record.service, record.protocol, record.target, record.port);
+  return { domain: record.hostname, service: record.service, protocol: record.protocol, target, port: record.port, link, isWeb: web.isWeb, isVlessFallback: vlessFallback.canRedirect, updatedAt: record.updatedAt, updatedIso: record.updatedAt ? new Date(record.updatedAt).toISOString() : "", updatedLabel: formatRecordTime(record.updatedAt), redirectStatus: globalThis.customRedirectModes[record.hostname] || config.defaultRedirectStatus, raw: config.debugMode ? record.raw : undefined };
 }
 
 function getPageHead(title, config = {}) {
@@ -630,15 +634,15 @@ async function handleSrvRedirect(request, config) {
     });
   }
   const bestSrv = records[0];
-  const { isWeb, scheme } = determineIfWebService(bestSrv.service, bestSrv.protocol);
-  if (!isWeb) return buildNonWebResponse(bestSrv, config);
+  const web = getWebServiceRedirect(bestSrv, config);
+  const vlessFallback = getVlessFallbackRedirect(bestSrv, config);
+  const redirect = web.isWeb ? web : vlessFallback;
+  if (!redirect.canRedirect) return buildNonWebResponse(bestSrv, config);
   const status = globalThis.customRedirectModes[hostname] || config.defaultRedirectStatus;
-  return new Response(null, { status, headers: { Location: `${scheme}://${bestSrv.target}:${bestSrv.port}${url.pathname}${url.search}`, "Cache-Control": "no-store" } });
+  return new Response(null, { status, headers: { Location: `${redirect.scheme}://${redirect.target}:${bestSrv.port}${url.pathname}${url.search}`, "Cache-Control": "no-store" } });
 }
 function compareSrvForRedirect(a, b) {
-  const aWeb = determineIfWebService(a.service, a.protocol).isWeb ? 0 : 1;
-  const bWeb = determineIfWebService(b.service, b.protocol).isWeb ? 0 : 1;
-  return aWeb - bWeb || a.priority - b.priority || b.weight - a.weight || compareSrvFreshness(a, b);
+  return getSrvRedirectPriority(a) - getSrvRedirectPriority(b) || a.priority - b.priority || b.weight - a.weight || compareSrvFreshness(a, b);
 }
 function buildNonWebResponse(srv, config = {}) {
   const localLink = getLocalSchemeLink(srv.service, srv.protocol, srv.target, srv.port);
@@ -647,8 +651,49 @@ function buildNonWebResponse(srv, config = {}) {
   return htmlResponse(`<!doctype html><html lang="zh-CN">${getPageHead("服务信息", config)}<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"><main class="mx-auto flex min-h-screen w-full max-w-2xl flex-col justify-center gap-4 px-4 py-8"><section class="rounded-3xl border border-amber-300/20 bg-zinc-900/90 p-6 shadow-2xl shadow-black/50 ring-1 ring-white/5"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">Non-Web Service</p><h1 class="mt-2 break-all text-2xl font-bold tracking-tight text-zinc-50">${escapeHtml(srv.hostname)}</h1><dl class="mt-6 grid gap-3 text-sm"><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">服务</dt><dd class="font-medium text-zinc-100">${escapeHtml(srv.service)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">协议</dt><dd class="font-medium text-zinc-100">${escapeHtml(srv.protocol)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">目标</dt><dd class="break-all font-medium text-zinc-100">${escapeHtml(srv.target)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">端口</dt><dd><code class="rounded-lg border border-amber-300/15 bg-black/30 px-2 py-1 font-mono text-sm font-semibold text-amber-200">${srv.port}</code></dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">链接</dt><dd class="min-w-0">${linkPart}</dd></div></dl></section>${debugInfo}</main></body></html>`);
 }
 
+function getWebServiceRedirect(record, config) {
+  const { isWeb, scheme } = determineIfWebService(record.service, record.protocol);
+  if (!isWeb) return { canRedirect: false, isWeb: false, scheme, target: record.target };
+  return { canRedirect: true, isWeb: true, scheme, target: record.target };
+}
+
+function getVlessFallbackRedirect(record, config) {
+  if (!isVlessFallbackService(record.service)) return { canRedirect: false, scheme: "https", target: record.target };
+  return {
+    canRedirect: true,
+    scheme: "https",
+    target: resolveVlessFallbackTarget(record.hostname, record.target, config),
+  };
+}
+
+function getSrvRedirectPriority(record) {
+  if (determineIfWebService(record.service, record.protocol).isWeb) return 0;
+  if (isVlessFallbackService(record.service)) return 1;
+  return 2;
+}
+
+function resolveVlessFallbackTarget(hostname, target, config) {
+  const portalDomain = String(config.portalDomain || "").toLowerCase();
+  const normalizedHostname = normalizeHostname(hostname);
+  const normalizedTarget = normalizeHostname(target);
+  if (!portalDomain || !normalizedHostname.endsWith(`.${portalDomain}`)) return normalizedTarget;
+
+  const subdomain = normalizedHostname.slice(0, -(portalDomain.length + 1));
+  if (!subdomain || subdomain.includes(".") || normalizedTarget.startsWith(`${subdomain}.`)) return normalizedTarget;
+
+  const parentDomain = portalDomain.split(".").slice(1).join(".");
+  if (!parentDomain || !normalizedTarget.endsWith(`.${parentDomain}`)) return normalizedTarget;
+
+  const targetPrefix = normalizedTarget.slice(0, -(parentDomain.length + 1));
+  return targetPrefix && !targetPrefix.includes(".") ? `${subdomain}.${normalizedTarget}` : normalizedTarget;
+}
+
+function isVlessFallbackService(service) {
+  return (service || "").toLowerCase() === "_vless_fb";
+}
+
 function determineIfWebService(service, protocol) {
-  // 只有 Web 类 SRV 执行 HTTP 重定向；SSH/RDP/FTP 等返回服务信息页和本地协议链接。
+  // 只识别真正的 HTTP/HTTPS SRV；VLESS fallback 由独立分支处理。
   const s = (service || "").toLowerCase();
   const p = (protocol || "").toLowerCase();
   let scheme = "http";

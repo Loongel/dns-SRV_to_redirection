@@ -59,10 +59,26 @@ function portalSrvRecord() {
   };
 }
 
+function vlessFallbackSrvRecord() {
+  return {
+    id: "srv-vless-fb",
+    name: "_vless_FB._tcp.vless-fb.s.example.com",
+    type: "SRV",
+    created_on: "2026-05-26T00:00:00Z",
+    modified_on: "2026-05-26T00:03:00Z",
+    data: {
+      priority: 0,
+      weight: 0,
+      port: 8443,
+      target: "n.example.com",
+    },
+  };
+}
+
 globalThis.fetch = async (url, init = {}) => {
   const u = new URL(url);
   if (u.searchParams.get("type") === "SRV") {
-    return Response.json({ success: true, result: [srvRecord(), webSrvRecord(), portalSrvRecord()], result_info: { page: 1, total_pages: 1 } });
+    return Response.json({ success: true, result: [srvRecord(), webSrvRecord(), portalSrvRecord(), vlessFallbackSrvRecord()], result_info: { page: 1, total_pages: 1 } });
   }
   if (u.searchParams.get("type") === "TXT") {
     return Response.json({ success: true, result: [] });
@@ -104,6 +120,11 @@ if (!nonWebHtml.includes("tailwindcss-browser") || nonWebHtml.includes("<style")
 const exactWeb = await worker.fetch(new Request("https://web.s.example.com/app?x=1"), env, {});
 if (exactWeb.status !== 307 || exactWeb.headers.get("Location") !== "https://web.n.example.com:2424/app?x=1") {
   throw new Error("exact web SRV redirect mismatch");
+}
+
+const vlessFallback = await worker.fetch(new Request("https://vless-fb.s.example.com/fallback?x=1"), env, {});
+if (vlessFallback.status !== 307 || vlessFallback.headers.get("Location") !== "https://vless-fb.n.example.com:8443/fallback?x=1") {
+  throw new Error("vless_FB fallback redirect mismatch");
 }
 
 const wildcardWeb = await worker.fetch(new Request("https://newapi.s.example.com/path?q=1"), env, {});
