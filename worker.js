@@ -581,9 +581,15 @@ async function enqueueNatmapRefresh(domain, config) {
   if (!listResp.ok) return { ok: false, error: `Cloudflare TXT 查询失败 ${listResp.status}` };
   const listJson = await listResp.json();
   if (!listJson.success) return { ok: false, error: "Cloudflare TXT 查询失败" };
-  const existing = (listJson.result || [])[0];
+  const existingRecords = listJson.result || [];
+  for (const record of existingRecords) {
+    const deleteResp = await fetch(`${apiBase}/${record.id}`, { method: "DELETE", headers });
+    if (!deleteResp.ok) return { ok: false, error: `Cloudflare TXT 清理失败 ${deleteResp.status}` };
+    const deleteJson = await deleteResp.json();
+    if (!deleteJson.success) return { ok: false, error: "Cloudflare TXT 清理失败" };
+  }
   const body = JSON.stringify({ type: "TXT", name: config.refreshQueueName, content, ttl: 60, proxied: false });
-  const saveResp = await fetch(existing ? `${apiBase}/${existing.id}` : apiBase, { method: existing ? "PUT" : "POST", headers, body });
+  const saveResp = await fetch(apiBase, { method: "POST", headers, body });
   if (!saveResp.ok) return { ok: false, error: `Cloudflare TXT 写入失败 ${saveResp.status}` };
   const saveJson = await saveResp.json();
   return saveJson.success ? { ok: true } : { ok: false, error: "Cloudflare TXT 写入失败" };

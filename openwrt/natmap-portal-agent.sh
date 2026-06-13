@@ -11,6 +11,8 @@ HEALTH_INTERVAL=${NATMAP_HEALTH_INTERVAL:-300}
 FAIL_THRESHOLD=${NATMAP_HEALTH_FAIL_THRESHOLD:-2}
 TIMEOUT=${NATMAP_HEALTH_TIMEOUT:-4}
 MAX_AGE_MS=${NATMAP_REFRESH_MAX_AGE_MS:-900000}
+REFRESH_RETRY_LIMIT=${NATMAP_REFRESH_RETRY_LIMIT:-3}
+REFRESH_RESTART_WAIT_SECONDS=${NATMAP_REFRESH_RESTART_WAIT_SECONDS:-10}
 STATE_DIR=/tmp/natmap-portal-agent
 STATUS_PATH=/var/run/natmap
 CUSTOM_DIR=/etc/natmap/health.d
@@ -55,7 +57,28 @@ find_section_by_domain() {
 	SECTION="$found"
 }
 
-restart_section() {
+public_port_for_section() {
+	local section="$1" status_file
+	status_file="$(status_file_for_sid "$section")" || return 1
+	jsonfilter -q -i "$status_file" -e @.port 2>/dev/null
+}
+
+wait_public_port() {
+	local section="$1" i port
+	i=0
+	while [ "$i" -lt "$REFRESH_RESTART_WAIT_SECONDS" ]; do
+		port="$(public_port_for_section "$section" 2>/dev/null)"
+		if [ -n "$port" ]; then
+			WAIT_PUBLIC_PORT="$port"
+			return 0
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+	return 1
+}
+
+restart_section_once() {
 	local section="$1" reason="$2" port
 	port="$(uci -q get "natmap.${section}.port")"
 	if echo "$port" | grep -q -- -; then
@@ -68,13 +91,56 @@ restart_section() {
 	/etc/init.d/natmap start "$section" >/dev/null 2>&1
 }
 
+restart_section() {
+	local section="$1" reason="$2" ensure_changed="${3:-0}" before after attempt limit label
+	before="$(public_port_for_section "$section" 2>/dev/null || true)"
+	limit=1
+	[ "$ensure_changed" = 1 ] && limit="$REFRESH_RETRY_LIMIT"
+	attempt=1
+	while [ "$attempt" -le "$limit" ]; do
+		label="$reason"
+		[ "$ensure_changed" = 1 ] && label="$reason attempt $attempt/$limit"
+		restart_section_once "$section" "$label"
+		if [ "$ensure_changed" != 1 ]; then
+			return 0
+		fi
+		WAIT_PUBLIC_PORT=""
+		if wait_public_port "$section"; then
+			after="$WAIT_PUBLIC_PORT"
+			if [ -z "$before" ] || [ "$after" != "$before" ]; then
+				log "$section: public port changed ${before:-unknown} -> $after"
+				return 0
+			fi
+			log "$section: public port still $after after manual refresh"
+		else
+			log "$section: no runtime public port after manual refresh attempt $attempt"
+		fi
+		attempt=$((attempt + 1))
+	done
+	return 0
+}
+
 fetch_refresh_request() {
-	local output line
+	local output line content old_ifs domain ts nonce best_domain best_ts best_nonce
 	output="$(nslookup -type=TXT "$QUEUE_NAME" 2>/dev/null)" || return 1
-	line="$(printf '%s\n' "$output" | awk -F'text = ' 'NF > 1 { print $2; exit }')"
-	[ -n "$line" ] || return 1
-	REQUEST_CONTENT="$(printf '%s' "$line" | sed 's/^"//;s/"$//;s/"[[:space:]]*"//g')"
-	[ -n "$REQUEST_CONTENT" ]
+	while IFS= read -r line; do
+		case "$line" in
+			*"text = "*) content="${line#*text = }" ;;
+			*) continue ;;
+		esac
+		content="$(printf '%s' "$content" | sed 's/^"//;s/"$//;s/"[[:space:]]*"//g')"
+		old_ifs="$IFS"; IFS="|"; set -- $content; IFS="$old_ifs"
+		domain="$1"; ts="$2"; nonce="$3"
+		[ -n "$domain" ] && [ -n "$ts" ] && [ -n "$nonce" ] || continue
+		case "$ts" in *[!0-9]*|"") continue;; esac
+		if [ -z "$best_ts" ] || [ "$ts" -gt "$best_ts" ]; then
+			best_domain="$domain"; best_ts="$ts"; best_nonce="$nonce"
+		fi
+	done <<EOF
+$output
+EOF
+	[ -n "$best_nonce" ] || return 1
+	REQUEST_CONTENT="$best_domain|$best_ts|$best_nonce"
 }
 
 process_refresh_once() {
@@ -94,7 +160,7 @@ process_refresh_once() {
 		return 0
 	fi
 	if find_section_by_domain "$domain"; then
-		restart_section "$SECTION" "manual refresh for $domain"
+		restart_section "$SECTION" "manual refresh for $domain" 1
 	else
 		log "$domain: no natmap section matched"
 	fi

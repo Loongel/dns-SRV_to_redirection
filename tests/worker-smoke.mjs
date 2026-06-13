@@ -2,6 +2,7 @@ import worker from "../worker.js";
 
 let port = 24467;
 let txtWrites = 0;
+let txtDeletes = 0;
 const env = {
   DOMAINS: "*.s.example.com",
   PORTAL_DOMAIN: "s.example.com",
@@ -81,7 +82,11 @@ globalThis.fetch = async (url, init = {}) => {
     return Response.json({ success: true, result: [srvRecord(), webSrvRecord(), portalSrvRecord(), vlessFallbackSrvRecord()], result_info: { page: 1, total_pages: 1 } });
   }
   if (u.searchParams.get("type") === "TXT") {
-    return Response.json({ success: true, result: [] });
+    return Response.json({ success: true, result: [{ id: "old-txt-1" }, { id: "old-txt-2" }] });
+  }
+  if (init.method === "DELETE") {
+    txtDeletes += 1;
+    return Response.json({ success: true, result: { id: u.pathname.split("/").pop() } });
   }
   if (init.method === "POST" || init.method === "PUT") {
     txtWrites += 1;
@@ -154,7 +159,7 @@ const refresh = await worker.fetch(new Request("https://s.example.com/api/refres
   body: JSON.stringify({ pwd: "secret", domain: "hm-hy2.s.example.com", currentPort: 24467 }),
 }), env, {});
 const refreshJson = await refresh.json();
-if (!refreshJson.ok || txtWrites !== 1) throw new Error("refresh API did not queue TXT");
+if (!refreshJson.ok || txtWrites !== 1 || txtDeletes !== 2) throw new Error("refresh API did not replace TXT queue cleanly");
 
 port = 25555;
 const api2 = await worker.fetch(new Request("https://s.example.com/api/resources?pwd=secret&force=1"), env, {});

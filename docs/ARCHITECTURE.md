@@ -45,13 +45,13 @@ The portal includes:
 
 ## Refresh Queue
 
-Manual refresh writes one TXT record:
+Manual refresh replaces the TXT queue with one fresh record. The Worker deletes existing TXT records with the same queue name before creating the new value:
 
 ```text
 <NATMAP_REFRESH_QUEUE_NAME> = "<domain>|<unix-ms>|<nonce>"
 ```
 
-The OpenWrt agent polls the TXT through `nslookup`, validates message age and nonce, finds the natmap section whose `ddns_srv` equals `<domain>`, and restarts only that section.
+The OpenWrt agent polls the TXT through `nslookup`, selects the newest valid timestamp if DNS returns multiple TXT values, validates message age and nonce, finds the natmap section whose `ddns_srv` equals `<domain>`, and restarts only that section.
 
 The agent stores the last processed nonce at:
 

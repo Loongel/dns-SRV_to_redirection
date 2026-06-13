@@ -101,6 +101,8 @@ The agent works with defaults, but these can be exported before running it:
 | `NATMAP_HEALTH_FAIL_THRESHOLD` | `2` | Consecutive failures before restarting a section. |
 | `NATMAP_HEALTH_TIMEOUT` | `4` | Probe timeout in seconds. |
 | `NATMAP_REFRESH_MAX_AGE_MS` | `900000` | Ignore stale refresh TXT messages older than this age. |
+| `NATMAP_REFRESH_RETRY_LIMIT` | `3` | Manual refresh restart attempts when the public port does not change. |
+| `NATMAP_REFRESH_RESTART_WAIT_SECONDS` | `10` | Seconds to wait for natmap runtime status after each manual refresh restart. |
 | `NATMAP_PORTAL_VERBOSE` | `0` | Print logs to stdout as well as `logger`. |
 
 ## Safety Notes
