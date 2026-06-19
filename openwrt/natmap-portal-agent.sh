@@ -1,6 +1,7 @@
 #!/bin/bash
 
 . /lib/functions.sh
+. /usr/share/libubox/jshn.sh
 
 CONFIG_FILE=${NATMAP_PORTAL_AGENT_CONFIG:-/etc/natmap/natmap-portal-agent.conf}
 [ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
@@ -13,6 +14,8 @@ TIMEOUT=${NATMAP_HEALTH_TIMEOUT:-4}
 MAX_AGE_MS=${NATMAP_REFRESH_MAX_AGE_MS:-900000}
 REFRESH_RETRY_LIMIT=${NATMAP_REFRESH_RETRY_LIMIT:-3}
 REFRESH_RESTART_WAIT_SECONDS=${NATMAP_REFRESH_RESTART_WAIT_SECONDS:-10}
+CLEANUP_DISABLED=${NATMAP_CLEANUP_DISABLED:-1}
+CLEANUP_INTERVAL=${NATMAP_CLEANUP_INTERVAL:-300}
 STATE_DIR=/tmp/natmap-portal-agent
 STATUS_PATH=/var/run/natmap
 CUSTOM_DIR=/etc/natmap/health.d
@@ -263,16 +266,67 @@ process_health_once() {
 	config_foreach check_section natmap
 }
 
+cleanup_file() { echo "$STATE_DIR/$(safe_name "$1").cleanup"; }
+
+cleanup_disabled_section() {
+	local section="$1" enable ddns_script ddns_tokens ddns_srv ddns_srv_serv ddns_srv_proto ddns_https sig file payload
+
+	[ "$CLEANUP_DISABLED" = 1 ] || return 0
+	config_get_bool enable "$section" enable 0
+	if [ "$enable" = 1 ]; then
+		rm -f "$(cleanup_file "$section")"
+		return 0
+	fi
+	config_get ddns_script "$section" ddns_script
+	[ -x "$ddns_script" ] || return 0
+	config_get ddns_tokens "$section" ddns_tokens
+	[ -n "$ddns_tokens" ] || return 0
+	case "$ddns_tokens" in *"<"*|*">"*) log "$section: skip disabled cleanup with placeholder DDNS tokens"; return 0;; esac
+	config_get ddns_srv "$section" ddns_srv
+	config_get ddns_srv_serv "$section" ddns_srv_serv
+	config_get ddns_srv_proto "$section" ddns_srv_proto
+	config_get ddns_https "$section" ddns_https
+	[ -n "$ddns_srv" ] || [ -n "$ddns_https" ] || return 0
+
+	sig="${ddns_srv}|${ddns_srv_serv}|${ddns_srv_proto:-tcp}|${ddns_https}|${ddns_script}"
+	file="$(cleanup_file "$section")"
+	[ -r "$file" ] && [ "$(cat "$file" 2>/dev/null)" = "$sig" ] && return 0
+
+	json_init
+	json_add_boolean cleanup 1
+	json_add_string tokens "$ddns_tokens"
+	[ -n "$ddns_srv" ] && json_add_string srv "$ddns_srv"
+	[ -n "$ddns_srv_serv" ] && json_add_string srv_serv "$ddns_srv_serv"
+	json_add_string srv_proto "${ddns_srv_proto:-tcp}"
+	[ -n "$ddns_https" ] && json_add_string https "$ddns_https"
+	payload="$(json_dump)"
+	if "$ddns_script" "$payload"; then
+		echo "$sig" > "$file"
+		log "$section: cleaned DNS for disabled section ${ddns_srv:-$ddns_https}"
+	else
+		log "$section: failed to clean DNS for disabled section ${ddns_srv:-$ddns_https}"
+	fi
+}
+
+process_cleanup_once() {
+	config_load natmap
+	config_foreach cleanup_disabled_section natmap
+}
+
 
 daemon_loop() {
-	log "portal agent started: refresh=${REFRESH_INTERVAL}s health=${HEALTH_INTERVAL}s queue=${QUEUE_NAME}"
-	local last_health=0 now
+	log "portal agent started: refresh=${REFRESH_INTERVAL}s health=${HEALTH_INTERVAL}s cleanup=${CLEANUP_INTERVAL}s queue=${QUEUE_NAME}"
+	local last_health=0 last_cleanup=0 now
 	while true; do
 		process_refresh_once
 		now=$(date +%s)
 		if [ $((now - last_health)) -ge "$HEALTH_INTERVAL" ]; then
 			process_health_once
 			last_health="$now"
+		fi
+		if [ "$CLEANUP_DISABLED" = 1 ] && [ $((now - last_cleanup)) -ge "$CLEANUP_INTERVAL" ]; then
+			process_cleanup_once
+			last_cleanup="$now"
 		fi
 		sleep "$REFRESH_INTERVAL"
 	done
@@ -288,6 +342,7 @@ start_daemon() {
 case "$1" in
 	--once-refresh) process_refresh_once ;;
 	--once-health) process_health_once ;;
+	--once-cleanup) process_cleanup_once ;;
 	--daemon) daemon_loop ;;
 	*) start_daemon ;;
 esac

@@ -78,7 +78,7 @@ Do not also install cron jobs for this project. The agent runs from natmap `cust
 
 ## natmap Section Requirements
 
-For refresh and health maintenance, each managed service should have:
+For refresh, health maintenance, and stale DNS cleanup, each managed service should keep its DDNS metadata even when disabled:
 
 ```text
 option enable '1'
@@ -99,6 +99,8 @@ option port_pointer '1'
 ```
 
 OpenWrt natmap converts that to `-b 60111~60120`, which means random allocation inside the range.
+
+When a section is disabled, the portal agent can automatically remove its stale SRV/HTTPS records from Cloudflare as long as `ddns_script`, real `ddns_tokens`, and the corresponding `ddns_srv` or `ddns_https` values remain in UCI. Placeholder tokens such as `<api_token>` are skipped. It intentionally does not remove shared A/AAAA records.
 
 ## Health Probe Overrides
 

@@ -62,11 +62,31 @@ replace_record_by_name() {
 	cf_request POST "" "$data" >/dev/null
 }
 
+cleanup_records() {
+	local rc=0
+
+	if [ -n "${srv}" ] && [ -n "${srv_serv}" ]; then
+		delete_records_by_name "SRV" "_${srv_serv}._${srv_proto:-tcp}.${srv}" || rc=1
+	fi
+	if [ -n "${https}" ]; then
+		delete_records_by_name "HTTPS" "${https}" || rc=1
+	fi
+	if [ "${cleanup_host:-0}" = 1 ] && [ -n "${host}" ] && [ -n "${hostype}" ]; then
+		delete_records_by_name "${hostype}" "${host}" || rc=1
+	fi
+	return "$rc"
+}
+
 start() {
 	local retry='--connect-timeout 3 --retry 5'
 	local records
-	records="$(cf_request GET "" "")"
+	records="$(cf_request GET "?per_page=5000" "")"
 	[ -z "$records" -o -n "$(grep -E "\"success\":\s*false" <<< "$records")" ] && return 1
+
+	if [ "${cleanup:-0}" = 1 ]; then
+		cleanup_records
+		return $?
+	fi
 
 	if [ -n "$host" ]; then
 		json_init
@@ -113,8 +133,9 @@ start() {
 	fi
 }
 
-ALL_PARAMS="hostype host srv srv_serv srv_proto srv_target srv_priority srv_weight ip port https https_target https_svcparams https_priority tokens"
+ALL_PARAMS="hostype host srv srv_serv srv_proto srv_target srv_priority srv_weight ip port https https_target https_svcparams https_priority cleanup cleanup_host tokens"
 eval "$(JSON_EXPORT "$1")"; shift
 INIT_GLOBAL_VAR TOKEN ZONE_ID
+case "$tokens" in *"<"*|*">"*) exit 1;; esac
 eval "$tokens"
 start "$@"

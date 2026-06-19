@@ -84,6 +84,8 @@ This keeps Host/SNI correct while still connecting to the natmap public IP and p
 
 The OpenWrt DDNS script lists existing records, deletes old records with the same type and name, and then posts the replacement record. This prevents stale duplicate SRV records from accumulating when natmap changes port.
 
+The portal agent also reconciles disabled natmap sections. If a disabled section still has a DDNS script, tokens, and SRV/HTTPS names, the agent calls the DDNS script in cleanup mode and deletes only those SRV/HTTPS records. Shared A/AAAA records are not deleted unless an explicit cleanup request enables host deletion. Successful cleanup is recorded in `/tmp/natmap-portal-agent/*.cleanup` so the agent does not repeat the Cloudflare API call every loop.
+
 ## Rate Limits
 
 The Worker uses in-memory per-isolate rate limits:
