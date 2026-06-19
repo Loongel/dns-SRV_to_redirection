@@ -281,7 +281,7 @@ cleanup_disabled_section() {
 	[ -x "$ddns_script" ] || return 0
 	config_get ddns_tokens "$section" ddns_tokens
 	[ -n "$ddns_tokens" ] || return 0
-	case "$ddns_tokens" in *"<"*|*">"*) log "$section: skip disabled cleanup with placeholder DDNS tokens"; return 0;; esac
+	case "$ddns_tokens" in *"<"*|*">"*) return 0;; esac
 	config_get ddns_srv "$section" ddns_srv
 	config_get ddns_srv_serv "$section" ddns_srv_serv
 	config_get ddns_srv_proto "$section" ddns_srv_proto
@@ -332,17 +332,21 @@ daemon_loop() {
 	done
 }
 
-start_daemon() {
+run_locked_daemon() {
 	(
 		flock -n 9 || exit 0
 		daemon_loop
-	) 9>"$LOCK_FILE" &
+	) 9>"$LOCK_FILE"
+}
+
+start_daemon() {
+	run_locked_daemon &
 }
 
 case "$1" in
 	--once-refresh) process_refresh_once ;;
 	--once-health) process_health_once ;;
 	--once-cleanup) process_cleanup_once ;;
-	--daemon) daemon_loop ;;
+	--daemon) run_locked_daemon ;;
 	*) start_daemon ;;
 esac
