@@ -100,7 +100,7 @@ globalThis.fetch = async (url, init = {}) => {
 
 const portal = await worker.fetch(new Request("https://s.example.com/?pwd=secret"), env, {});
 const html = await portal.text();
-for (const needle of ["tailwindcss-browser", "resourceSearch", "refresh-card", "浏览器时区", "data-time=\"2026-05-26T"]) {
+for (const needle of ["tailwindcss-browser", "resourceSearch", "refresh-card", "copy-button", "copyToast", "navigator.clipboard", "复制完整 URL", "复制端口", "data-copy=\"2424\"", "浏览器时区", "data-time=\"2026-05-26T"]) {
   if (!html.includes(needle)) throw new Error(`portal missing ${needle}`);
 }
 if (html.includes("<style") || html.includes("style=")) throw new Error("portal should use Tailwind CDN without inline styles");
