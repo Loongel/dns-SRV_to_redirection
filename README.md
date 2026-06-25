@@ -105,15 +105,16 @@ The agent works with defaults, but these can be exported before running it:
 | `NATMAP_REFRESH_RESTART_WAIT_SECONDS` | `10` | Seconds to wait for natmap runtime status after each manual refresh restart. |
 | `NATMAP_CLEANUP_DISABLED` | `1` | Delete SRV/HTTPS DNS records for disabled natmap sections that still carry DDNS config. |
 | `NATMAP_CLEANUP_INTERVAL` | `300` | Disabled-section cleanup interval in seconds. |
+| `NATMAP_DNS_RECONCILE_INTERVAL` | `300` | Minimum seconds between DDNS repair attempts when DNS SRV still points at an old port. |
 | `NATMAP_PORTAL_VERBOSE` | `0` | Print logs to stdout as well as `logger`. |
 
 ## Safety Notes
 
 - OpenWrt refresh polling reads TXT through system DNS (`nslookup`); it does not use Cloudflare API tokens.
-- Disabled natmap cleanup uses the section's own DDNS script and tokens to delete stale SRV/HTTPS records; it does not delete shared A/AAAA records by default.
+- Disabled natmap cleanup and stale SRV repair use the section's own DDNS script and tokens; the agent itself still reads refresh/DNS state through system DNS tools.
 - Worker force-refresh and manual refresh APIs require the portal password and have in-memory rate limits.
 - Manual browser refresh after clicking "refresh port" does not repeat the action; POST fallback uses `303 See Other`.
-- UDP services are not generically probeable. Add service-specific scripts under `/etc/natmap/health.d/` for HY2, QUIC, game protocols, and similar services.
+- `_vless_fb` is probed as HTTPS fallback using the derived fallback hostname, while plain VLESS still defaults to TCP connect. UDP services are not generically probeable; add service-specific scripts under `/etc/natmap/health.d/` for HY2, QUIC, game protocols, and similar services.
 
 ## Documentation
 

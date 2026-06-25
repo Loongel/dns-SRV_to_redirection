@@ -78,7 +78,7 @@ cleanup_records() {
 }
 
 start() {
-	local retry='--connect-timeout 3 --retry 5'
+	local retry='--connect-timeout 3 --max-time 20 --retry 2 --retry-delay 2'
 	local records
 	records="$(cf_request GET "?per_page=5000" "")"
 	[ -z "$records" -o -n "$(grep -E "\"success\":\s*false" <<< "$records")" ] && return 1

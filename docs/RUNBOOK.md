@@ -63,9 +63,9 @@ Failure counters live in:
 /tmp/natmap-portal-agent/<section>.fail
 ```
 
-A success removes the counter. When the count reaches `NATMAP_HEALTH_FAIL_THRESHOLD`, the section is restarted and the counter is removed.
+A success removes the counter. Failure counters are written atomically so an interrupted write does not leave a zero-byte counter. When the count reaches `NATMAP_HEALTH_FAIL_THRESHOLD`, the section is restarted and the counter is removed.
 
-For UDP services, add custom probes. Generic UDP cannot reliably distinguish a healthy silent service from a filtered or broken one.
+If the runtime JSON port differs from the DNS SRV port, check `/tmp/natmap-portal-agent/*.reconcile` and `logread -e natmap-portal`; the agent should re-run the section DDNS script instead of restarting natmap. For UDP services, add custom probes. Generic UDP cannot reliably distinguish a healthy silent service from a filtered or broken one.
 
 ## Rollback
 

@@ -17,6 +17,7 @@ Available environment variables:
 | `NATMAP_DDNS_SRV` | portal-facing service domain |
 | `NATMAP_DDNS_SRV_TARGET` | SRV target hostname |
 | `NATMAP_DDNS_HTTPS_TARGET` | HTTPS target hostname |
+| `NATMAP_VLESS_FALLBACK_TARGET` | derived HTTPS fallback hostname for `vless_fb` services |
 | `NATMAP_SERVICE` | service name such as `http`, `rdp`, `hy2` |
 | `NATMAP_PROTO` | runtime protocol from status JSON |
 | `NATMAP_PUBLIC_IP` | natmap public IP |
@@ -25,4 +26,4 @@ Available environment variables:
 | `NATMAP_FORWARD_PORT` | configured forward port |
 | `NATMAP_TIMEOUT` | probe timeout seconds |
 
-UDP services such as HY2 or QUIC should normally provide a custom probe because generic UDP has no reliable response semantics.
+`vless_fb` has a built-in HTTPS fallback probe. Plain VLESS only gets a TCP connect probe by default; add a custom probe if you need protocol-level validation. UDP services such as HY2 or QUIC should normally provide a custom probe because generic UDP has no reliable response semantics.

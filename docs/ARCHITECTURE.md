@@ -69,7 +69,8 @@ Default behavior:
 | --- | --- |
 | `http` + `tls`, `https` | `curl` to `https://<target>:<public_port>/` with `--resolve <target>:<public_port>:<public_ip>` |
 | `http` without TLS | `curl` to `http://<target>:<public_port>/` with `--resolve` |
-| `ssh`, `ftp`, `ftps`, `rdp`, unknown TCP | TCP connect with `nc` |
+| `vless_fb` | HTTPS fallback probe using the derived fallback hostname, for example `flash.s.example.com` + `n.example.com` -> `flash.n.example.com` |
+| `ssh`, `ftp`, `ftps`, `rdp`, plain VLESS, unknown TCP | TCP connect with `nc` |
 | UDP | Healthy by default, unless a custom probe exists |
 
 For HTTP/HTTPS the target hostname is read from natmap section data in this order:
@@ -78,7 +79,11 @@ For HTTP/HTTPS the target hostname is read from natmap section data in this orde
 2. `ddns_srv_target`
 3. `ddns_srv`
 
-This keeps Host/SNI correct while still connecting to the natmap public IP and port.
+This keeps Host/SNI correct while still connecting to the natmap public IP and port. For `vless_fb`, the agent derives the fallback hostname the same way as the Worker redirect path when the SRV target is a parent-domain service host.
+
+## DNS SRV Reconciliation
+
+During health checks, the agent also queries the section's SRV name through `nslookup`. If DNS still advertises an old port while natmap runtime status has a newer public port, the agent calls that section's configured DDNS script with the current runtime IP and port. Attempts are rate-limited by `/tmp/natmap-portal-agent/*.reconcile` and `NATMAP_DNS_RECONCILE_INTERVAL`; this repairs stale DNS without restarting the natmap section.
 
 ## Cloudflare DDNS Cleanup
 

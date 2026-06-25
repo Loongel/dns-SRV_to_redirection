@@ -16,6 +16,7 @@ REFRESH_RETRY_LIMIT=${NATMAP_REFRESH_RETRY_LIMIT:-3}
 REFRESH_RESTART_WAIT_SECONDS=${NATMAP_REFRESH_RESTART_WAIT_SECONDS:-10}
 CLEANUP_DISABLED=${NATMAP_CLEANUP_DISABLED:-1}
 CLEANUP_INTERVAL=${NATMAP_CLEANUP_INTERVAL:-300}
+DNS_RECONCILE_INTERVAL=${NATMAP_DNS_RECONCILE_INTERVAL:-300}
 STATE_DIR=/tmp/natmap-portal-agent
 STATUS_PATH=/var/run/natmap
 CUSTOM_DIR=/etc/natmap/health.d
@@ -31,6 +32,11 @@ log() {
 
 safe_name() {
 	printf %s "$1" | tr -c A-Za-z0-9_.- _
+}
+
+atomic_write_file() {
+	local file="$1" content="$2" tmp="${1}.$$"
+	printf '%s\n' "$content" > "$tmp" && mv "$tmp" "$file"
 }
 
 status_file_for_sid() {
@@ -175,23 +181,50 @@ run_custom_probe() {
 	probe_name="$(safe_name "${ddns_srv:-$sid}")"
 	probe="$CUSTOM_DIR/$probe_name"
 	[ -x "$probe" ] || return 2
-	NATMAP_SID="$sid" NATMAP_COMMENT="$comment" NATMAP_DDNS_SRV="$ddns_srv" NATMAP_DDNS_SRV_TARGET="$ddns_srv_target" NATMAP_DDNS_HTTPS_TARGET="$ddns_https_target" NATMAP_SERVICE="$ddns_srv_serv" NATMAP_PROTO="$status_proto" NATMAP_PUBLIC_IP="$public_ip" NATMAP_PUBLIC_PORT="$public_port" NATMAP_INNER_IP="$inner_ip" NATMAP_INNER_PORT="$inner_port" NATMAP_FORWARD_TARGET="$forward_target" NATMAP_FORWARD_PORT="$forward_port" NATMAP_TIMEOUT="$TIMEOUT" "$probe"
+	NATMAP_SID="$sid" NATMAP_COMMENT="$comment" NATMAP_DDNS_SRV="$ddns_srv" NATMAP_DDNS_SRV_TARGET="$ddns_srv_target" NATMAP_DDNS_HTTPS_TARGET="$ddns_https_target" NATMAP_VLESS_FALLBACK_TARGET="$(vless_fallback_target)" NATMAP_SERVICE="$ddns_srv_serv" NATMAP_PROTO="$status_proto" NATMAP_PUBLIC_IP="$public_ip" NATMAP_PUBLIC_PORT="$public_port" NATMAP_INNER_IP="$inner_ip" NATMAP_INNER_PORT="$inner_port" NATMAP_FORWARD_TARGET="$forward_target" NATMAP_FORWARD_PORT="$forward_port" NATMAP_TIMEOUT="$TIMEOUT" "$probe"
 }
 
 tcp_connect_probe() {
 	timeout "$TIMEOUT" nc "$public_ip" "$public_port" </dev/null >/dev/null 2>&1
 }
 
-http_probe() {
-	local scheme="$1" host code
-	host="${ddns_https_target:-}"
-	[ -n "$host" ] && [ "$host" != "." ] || host="${ddns_srv_target:-}"
-	[ -n "$host" ] && [ "$host" != "." ] || host="$ddns_srv"
+http_probe_host() {
+	local scheme="$1" host="$2" code
+	[ -n "$host" ] && [ "$host" != "." ] || return 1
 	code="$(curl -k -sS -o /dev/null -w '%{http_code}' --connect-timeout "$TIMEOUT" --max-time "$TIMEOUT" --resolve "${host}:${public_port}:${public_ip}" "${scheme}://${host}:${public_port}/" 2>/dev/null)" || return 1
 	case "$code" in
 		[1-5][0-9][0-9]) return 0;;
 	esac
 	return 1
+}
+
+http_probe() {
+	local scheme="$1" host
+	host="${ddns_https_target:-}"
+	[ -n "$host" ] && [ "$host" != "." ] || host="${ddns_srv_target:-}"
+	[ -n "$host" ] && [ "$host" != "." ] || host="$ddns_srv"
+	http_probe_host "$scheme" "$host"
+}
+
+vless_fallback_target() {
+	local host target first host_parent parent target_suffix
+	host="$(printf %s "${ddns_srv:-}" | tr A-Z a-z)"
+	target="${ddns_srv_target:-}"
+	[ -n "$host" ] && [ -n "$target" ] && [ "$target" != "." ] || return 1
+	case "$host" in *.*.*) ;; *) printf %s "$target"; return 0;; esac
+	first="${host%%.*}"
+	host_parent="${host#*.}"
+	parent="${host_parent#*.}"
+	target_suffix="${target#*.}"
+	if [ -n "$first" ] && [ "$first" != "$host" ] && [ -n "$parent" ] && [ "$target_suffix" = "$parent" ]; then
+		case "$target" in "$first".*) printf %s "$target";; *) printf %s "$first.$target";; esac
+		return 0
+	fi
+	printf %s "$target"
+}
+
+vless_fallback_probe() {
+	http_probe_host https "$(vless_fallback_target)"
 }
 
 rdp_probe() {
@@ -211,6 +244,7 @@ probe_section() {
 			case "$service:$proto" in
 				http:tls|https:*) http_probe https; return $?;;
 				http:*|web:*) http_probe http; return $?;;
+				vless_fb:*|vless-fb:*) vless_fallback_probe; return $?;;
 				ssh:*) tcp_connect_probe; return $?;;
 				ftp:*) tcp_connect_probe; return $?;;
 				ftps:*) tcp_connect_probe; return $?;;
@@ -230,11 +264,103 @@ record_failure() {
 	local section="$1" reason="$2" file count
 	file="$(failure_file "$section")"
 	count=0; [ -s "$file" ] && count="$(cat "$file" 2>/dev/null || echo 0)"
-	count=$((count + 1)); echo "$count" > "$file"
+	case "$count" in *[!0-9]*|"") count=0;; esac
+	count=$((count + 1))
+	if ! atomic_write_file "$file" "$count"; then
+		log "$section ${ddns_srv:-$comment}: failed to persist probe failure counter"
+	fi
 	log "$section ${ddns_srv:-$comment}: probe failed ($reason), count=$count/$FAIL_THRESHOLD"
 	[ "$count" -lt "$FAIL_THRESHOLD" ] && return 0
 	restart_section "$section" "health check failed"
 	rm -f "$file"
+}
+
+dns_srv_record_name() {
+	local service proto
+	service="${ddns_srv_serv#_}"
+	proto="${ddns_srv_proto:-$status_proto}"
+	proto="${proto#_}"
+	[ -n "$service" ] && [ -n "$proto" ] && [ -n "$ddns_srv" ] || return 1
+	printf '_%s._%s.%s' "$service" "$proto" "$ddns_srv"
+}
+
+dns_srv_port() {
+	local name output line data
+	name="$(dns_srv_record_name)" || return 1
+	output="$(nslookup -type=SRV "$name" 2>/dev/null)" || return 1
+	while IFS= read -r line; do
+		case "$line" in
+			*"service = "*) data="${line#*service = }" ;;
+			*) continue ;;
+		esac
+		set -- $data
+		case "$3" in *[!0-9]*|"") return 1;; *) printf %s "$3"; return 0;; esac
+	done <<EOF
+$output
+EOF
+	return 1
+}
+
+reconcile_dns_srv() {
+	local dns_port ddns_script ddns_tokens ddns_a ddns_aaaa ddns_https ddns_https_svcparams ddns_https_priority family marker sig old now old_ts old_sig payload
+	dns_port="$(dns_srv_port)" || return 0
+	[ "$dns_port" = "$public_port" ] && return 0
+
+	marker="$STATE_DIR/$(safe_name "$sid").reconcile"
+	sig="${ddns_srv}|${ddns_srv_serv}|${ddns_srv_proto:-$status_proto}|${public_ip}|${public_port}|${dns_port}"
+	now="$(date +%s)"
+	if [ -r "$marker" ]; then
+		old="$(cat "$marker" 2>/dev/null)"
+		old_ts="${old%%|*}"
+		old_sig="${old#*|}"
+		case "$old_ts" in *[!0-9]*|"") old_ts=0;; esac
+		if [ "$old_sig" = "$sig" ] && [ $((now - old_ts)) -lt "$DNS_RECONCILE_INTERVAL" ]; then
+			return 0
+		fi
+	fi
+
+	config_get ddns_script "$sid" ddns_script
+	[ -x "$ddns_script" ] || return 0
+	config_get ddns_tokens "$sid" ddns_tokens
+	[ -n "$ddns_tokens" ] || return 0
+	case "$ddns_tokens" in *"<"*|*">"*) return 0;; esac
+	config_get family "$sid" family ipv4
+	config_get ddns_a "$sid" ddns_a
+	config_get ddns_aaaa "$sid" ddns_aaaa
+	config_get ddns_srv_priority "$sid" ddns_srv_priority 0
+	config_get ddns_srv_weight "$sid" ddns_srv_weight 65535
+	config_get ddns_https "$sid" ddns_https
+	config_get ddns_https_target "$sid" ddns_https_target
+	config_get ddns_https_svcparams "$sid" ddns_https_svcparams
+	config_get ddns_https_priority "$sid" ddns_https_priority 1
+
+	json_init
+	json_add_string tokens "$ddns_tokens"
+	case "$family" in
+		ipv6) [ -n "$ddns_aaaa" ] && json_add_string hostype "AAAA" && json_add_string host "$ddns_aaaa" ;;
+		*) [ -n "$ddns_a" ] && json_add_string hostype "A" && json_add_string host "$ddns_a" ;;
+	esac
+	json_add_string ip "$public_ip"
+	json_add_int port "$public_port"
+	json_add_string srv "$ddns_srv"
+	json_add_string srv_serv "$ddns_srv_serv"
+	json_add_string srv_proto "${ddns_srv_proto:-$status_proto}"
+	json_add_string srv_target "$ddns_srv_target"
+	json_add_int srv_priority "$ddns_srv_priority"
+	json_add_int srv_weight "$ddns_srv_weight"
+	if [ -n "$ddns_https" ]; then
+		json_add_string https "$ddns_https"
+		json_add_string https_target "$ddns_https_target"
+		json_add_string https_svcparams "$ddns_https_svcparams"
+		json_add_int https_priority "$ddns_https_priority"
+	fi
+	payload="$(json_dump)"
+	atomic_write_file "$marker" "$now|$sig" >/dev/null 2>&1 || true
+	if "$ddns_script" "$payload"; then
+		log "$sid ${ddns_srv}: reconciled SRV port $dns_port -> $public_port"
+	else
+		log "$sid ${ddns_srv}: failed to reconcile SRV port $dns_port -> $public_port"
+	fi
 }
 
 check_section() {
@@ -258,6 +384,7 @@ check_section() {
 	inner_ip="$(jsonfilter -q -i "$status_file" -e @.inner_ip 2>/dev/null)"
 	inner_port="$(jsonfilter -q -i "$status_file" -e @.inner_port 2>/dev/null)"
 	[ -n "$public_ip" ] && [ -n "$public_port" ] || { record_failure "$section" bad-status; return 0; }
+	reconcile_dns_srv
 	if probe_section; then record_success "$section"; else record_failure "$section" "${public_ip}:${public_port}/${status_proto}"; fi
 }
 

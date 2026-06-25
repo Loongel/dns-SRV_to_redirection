@@ -104,7 +104,7 @@ When a section is disabled, the portal agent can automatically remove its stale 
 
 ## Health Probe Overrides
 
-Place executable scripts in `/etc/natmap/health.d/<ddns_srv>` to override default health behavior for a service.
+Place executable scripts in `/etc/natmap/health.d/<ddns_srv>` to override default health behavior for a service. `_vless_fb` has a built-in HTTPS fallback probe; plain VLESS and other unknown TCP services default to TCP connect unless you provide a custom probe.
 
 Example:
 
