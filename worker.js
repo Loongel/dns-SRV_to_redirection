@@ -20,7 +20,8 @@
  * - NATMAP_REFRESH_QUEUE_NAME：端口刷新 TXT 队列名；默认 _natmap-refresh.<PORTAL_DOMAIN>
  * - WILDCARD_TEMPLATE_HOSTNAME：泛域名跳转模板 SRV 主机名；默认 web.<PORTAL_DOMAIN>
  * - WILDCARD_TEMPLATE_TARGET_PREFIXES：允许替换的模板目标前缀；默认 web,portal
- * - TAILWIND_CDN_URL：门户 UI 使用的 Tailwind CDN 地址，默认 BootCDN
+ * - TAILWIND_CDN_URLS：门户 UI 使用的 Tailwind CDN 地址列表，逗号分隔；按顺序加载，默认 fastly.jsdelivr + jsDelivr + unpkg
+ * - TAILWIND_CDN_URL：兼容旧配置，单个 Tailwind CDN 地址
  * - DEBUG_MODE：true 时在页面展示脱敏调试信息
  *
  * Secret 示例：
@@ -37,7 +38,7 @@
  * NATMAP_REFRESH_QUEUE_NAME = "_natmap-refresh.s.example.com"
  * WILDCARD_TEMPLATE_HOSTNAME = "web.s.example.com"
  * WILDCARD_TEMPLATE_TARGET_PREFIXES = "web,portal"
- * TAILWIND_CDN_URL = "https://cdn.bootcdn.net/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js"
+ * TAILWIND_CDN_URLS = "https://fastly.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/dist/index.global.min.js,https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/dist/index.global.min.js,https://unpkg.com/@tailwindcss/browser@4.1.13/dist/index.global.js"
  */
 
 export default {
@@ -78,13 +79,28 @@ function initConfig(env) {
     refreshQueueName: (env.NATMAP_REFRESH_QUEUE_NAME || `_natmap-refresh.${portalDomain}`).trim().toLowerCase(),
     wildcardTemplateHostname: normalizeHostname(env.WILDCARD_TEMPLATE_HOSTNAME || `web.${portalDomain}`),
     wildcardTemplateTargetPrefixes: parseCsv(env.WILDCARD_TEMPLATE_TARGET_PREFIXES || "web,portal"),
-    tailwindCdnUrl: (env.TAILWIND_CDN_URL || "https://cdn.bootcdn.net/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js").trim(),
+    tailwindCdnUrls: normalizeTailwindCdnUrls(env.TAILWIND_CDN_URLS || env.TAILWIND_CDN_URL),
   };
 }
 
 function parseRedirectStatus(value, fallback) {
   const status = parseInt(value, 10);
   return [301, 302, 307, 308].includes(status) ? status : fallback;
+}
+function normalizeTailwindCdnUrls(value) {
+  const fallback = [
+    "https://fastly.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/dist/index.global.min.js",
+    "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/dist/index.global.min.js",
+    "https://unpkg.com/@tailwindcss/browser@4.1.13/dist/index.global.js",
+  ];
+  const urls = String(value || "").split(",").map((url) => url.trim()).filter(Boolean);
+  const normalized = [];
+  for (const url of urls.length ? urls : fallback) {
+    if (url.includes("cdn.bootcdn.net/ajax/libs/tailwindcss-browser/")) continue;
+    if (!normalized.includes(url)) normalized.push(url);
+  }
+  for (const url of fallback) if (!normalized.includes(url)) normalized.push(url);
+  return normalized;
 }
 function parsePositiveInt(value, fallback) {
   const parsed = parseInt(value, 10);
@@ -315,9 +331,7 @@ function buildResource(record, config) {
 
 function getPageHead(title, config = {}) {
   // UI 只使用 Tailwind CDN，不内联自定义 CSS，方便 Worker 单文件部署。
-  const tailwind = config.tailwindCdnUrl
-    ? `<script src="${escapeAttribute(config.tailwindCdnUrl)}"></script>`
-    : "";
+  const tailwind = (config.tailwindCdnUrls || []).map((url) => `<script src="${escapeAttribute(url)}"></script>`).join("");
   return `<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title>${tailwind}</head>`;
 }
 

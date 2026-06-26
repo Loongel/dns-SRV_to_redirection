@@ -35,7 +35,7 @@ PORTAL_DOMAIN = "s.example.com"
 DEFAULT_REDIRECT_STATUS = "307"
 CACHE_TTL_SECONDS = "300"
 NATMAP_REFRESH_QUEUE_NAME = "_natmap-refresh.s.example.com"
-TAILWIND_CDN_URL = "https://cdn.bootcdn.net/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js"
+TAILWIND_CDN_URLS = "https://fastly.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/dist/index.global.min.js,https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/dist/index.global.min.js,https://unpkg.com/@tailwindcss/browser@4.1.13/dist/index.global.js"
 ```
 
 Create local secrets. `.secrets` is ignored by git:

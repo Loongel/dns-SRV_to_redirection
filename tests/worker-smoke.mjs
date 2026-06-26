@@ -100,7 +100,14 @@ globalThis.fetch = async (url, init = {}) => {
 
 const portal = await worker.fetch(new Request("https://s.example.com/?pwd=secret"), env, {});
 const html = await portal.text();
-for (const needle of ["tailwindcss-browser", "resourceSearch", "refresh-card", "copy-button", "copyToast", "navigator.clipboard", "复制完整 URL", "复制端口", "data-copy=\"2424\"", "浏览器时区", "data-time=\"2026-05-26T"]) {
+if (!html.includes("fastly.jsdelivr.net/npm/@tailwindcss/browser@4.1.13") || !html.includes("cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.13") || !html.includes("unpkg.com/@tailwindcss/browser@4.1.13")) throw new Error("portal should include three Tailwind CDN fallbacks");
+const oldCdnPortal = await worker.fetch(new Request("https://s.example.com/?pwd=secret"), { ...env, TAILWIND_CDN_URL: "https://cdn.bootcdn.net/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js" }, {});
+const oldCdnHtml = await oldCdnPortal.text();
+if (oldCdnHtml.includes("cdn.bootcdn.net") || !oldCdnHtml.includes("fastly.jsdelivr.net/npm/@tailwindcss/browser@4.1.13") || !oldCdnHtml.includes("cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.13")) throw new Error("old BootCDN URL should be replaced by fallback chain");
+const customCdnPortal = await worker.fetch(new Request("https://s.example.com/?pwd=secret"), { ...env, TAILWIND_CDN_URLS: "https://fast.example/tailwind.js,https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/dist/index.global.min.js" }, {});
+const customCdnHtml = await customCdnPortal.text();
+if (!customCdnHtml.includes("https://fast.example/tailwind.js") || customCdnHtml.indexOf("https://fast.example/tailwind.js") > customCdnHtml.indexOf("cdn.jsdelivr.net")) throw new Error("custom domestic CDN should keep first priority");
+for (const needle of ["@tailwindcss/browser", "resourceSearch", "refresh-card", "copy-button", "copyToast", "navigator.clipboard", "复制完整 URL", "复制端口", "data-copy=\"2424\"", "浏览器时区", "data-time=\"2026-05-26T"]) {
   if (!html.includes(needle)) throw new Error(`portal missing ${needle}`);
 }
 if (html.includes("<style") || html.includes("style=")) throw new Error("portal should use Tailwind CDN without inline styles");
@@ -112,13 +119,13 @@ if (html.includes(">保存</button>")) throw new Error("redirect status should n
 
 const auth = await worker.fetch(new Request("https://s.example.com/"), env, {});
 const authHtml = await auth.text();
-if (!authHtml.includes("tailwindcss-browser") || authHtml.includes("<style") || authHtml.includes("style=")) {
+if (!authHtml.includes("@tailwindcss/browser") || authHtml.includes("<style") || authHtml.includes("style=")) {
   throw new Error("auth page should use Tailwind CDN without inline styles");
 }
 
 const nonWeb = await worker.fetch(new Request("https://hm-hy2.s.example.com/"), env, {});
 const nonWebHtml = await nonWeb.text();
-if (!nonWebHtml.includes("tailwindcss-browser") || nonWebHtml.includes("<style") || nonWebHtml.includes("style=")) {
+if (!nonWebHtml.includes("@tailwindcss/browser") || nonWebHtml.includes("<style") || nonWebHtml.includes("style=")) {
   throw new Error("non-web page should use Tailwind CDN without inline styles");
 }
 
