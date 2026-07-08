@@ -265,7 +265,7 @@ async function handlePortalPageWithAuth(request, config) {
     return redirectToPortal(url, userPwd, queued.ok ? { refreshQueued: refreshDomain } : { refreshError: `端口刷新请求提交失败：${queued.error}` });
   }
   const managedRecords = getManagedSrvRecords(config);
-  return buildPortalPageHTML(managedRecords.map((r) => buildResource(r, config)), config, userPwd, notice);
+  return buildPortalPageHTML(buildResources(managedRecords, config), config, userPwd, notice);
 }
 async function handlePortalApi(request, config) {
   // 前端异步接口：资源轮询只读，端口刷新写 TXT 队列，二者都必须带门户密码。
@@ -276,7 +276,7 @@ async function handlePortalApi(request, config) {
     const force = url.searchParams.get("force") === "1";
     if (force && !canForceFetchSrv(request)) return jsonResponse({ ok: false, error: "rate limited" }, 429);
     await ensureSrvRecordsCache(config, { force });
-    const resources = getManagedSrvRecords(config).map((r) => buildResource(r, config));
+    const resources = buildResources(getManagedSrvRecords(config), config);
     const cache = globalThis.srvRecordsCache || {};
     return jsonResponse({ ok: true, resources, cache: { fetchedAt: cache.fetchedAt || 0, duplicateCount: cache.duplicateCount || 0, staleCount: cache.staleCount || 0, lastError: cache.lastError || "" } });
   }
@@ -319,7 +319,13 @@ function redirectToPortal(url, pwd, params = {}) {
 }
 function getManagedSrvRecords(config) { return (globalThis.srvRecordsCache?.data || []).filter((r) => matchesManagedDomain(r.hostname, config.domainList)); }
 function matchesManagedDomain(hostname, domainList) { return domainList.some((pattern) => wildcardToRegex(pattern).test(hostname)); }
-function buildResource(record, config) {
+function buildResources(records, config) {
+  const resources = records.map((record) => buildResourceBase(record, config));
+  const fallbackAuthPort = resources.find((r) => !isUdpProtocol(r.protocol))?.port || 0;
+  return resources.map((resource) => addAccessAuthFields(resource, fallbackAuthPort));
+}
+
+function buildResourceBase(record, config) {
   // 将 SRV 原始记录转换成门户直接渲染的数据结构。
   const web = getWebServiceRedirect(record, config);
   const vlessFallback = getVlessFallbackRedirect(record, config);
@@ -327,6 +333,15 @@ function buildResource(record, config) {
   const target = redirect.canRedirect ? redirect.target : record.target;
   const link = redirect.canRedirect ? `${redirect.scheme}://${target}:${record.port}` : getLocalSchemeLink(record.service, record.protocol, record.target, record.port);
   return { domain: record.hostname, service: record.service, protocol: record.protocol, target, port: record.port, link, isWeb: web.isWeb, isVlessFallback: vlessFallback.canRedirect, updatedAt: record.updatedAt, updatedIso: record.updatedAt ? new Date(record.updatedAt).toISOString() : "", updatedLabel: formatRecordTime(record.updatedAt), redirectStatus: globalThis.customRedirectModes[record.hostname] || config.defaultRedirectStatus, raw: config.debugMode ? record.raw : undefined };
+}
+function addAccessAuthFields(resource, fallbackAuthPort) {
+  const authPort = isUdpProtocol(resource.protocol) ? fallbackAuthPort : resource.port;
+  const hostPort = `${resource.target}:${resource.port}`;
+  const authUrl = authPort ? `https://${resource.target}:${authPort}/` : "";
+  return { ...resource, hostPort, authPort, authUrl };
+}
+function isUdpProtocol(protocol) {
+  return String(protocol || "").toLowerCase() === "_udp";
 }
 
 function getPageHead(title, config = {}) {
@@ -369,7 +384,11 @@ function buildPortCopyHtml(r) {
 function buildLinkHtml(r) {
   const value = r.link || `${r.target}:${r.port}`;
   const content = r.link ? `<a class="block truncate text-sm font-semibold text-amber-200 underline decoration-amber-300/50 underline-offset-4 hover:text-amber-100" href="${escapeAttribute(r.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.link)}</a>` : `<span class="block truncate text-sm text-zinc-500">${escapeHtml(value)}</span>`;
-  return `<div class="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">${content}${buildCopyButton(value, "URL", r.link ? "复制完整 URL" : "复制地址")}</div>`;
+  return `<div class="grid min-w-0 gap-2">${content}<div class="flex min-w-0 flex-wrap items-center gap-2">${buildCopyButton(value, "URL", r.link ? "复制完整 URL" : "复制地址")}${buildCopyButton(r.hostPort, "Host", "复制 Host Port")}${buildAuthLink(r)}</div></div>`;
+}
+function buildAuthLink(r) {
+  if (!r.authUrl) return "";
+  return `<a class="inline-flex h-8 shrink-0 items-center justify-center rounded-xl border border-amber-300/25 bg-amber-300/10 px-2 text-xs font-semibold text-amber-100 transition hover:bg-amber-300/20 focus:outline-none focus:ring-4 focus:ring-amber-300/10" href="${escapeAttribute(r.authUrl)}" target="_blank" rel="noopener noreferrer" title="打开认证入口" aria-label="打开 ${escapeAttribute(r.domain)} 的认证入口">认证</a>`;
 }
 function buildRedirectForm(r, userPwd) {
   const labels = { 301: "301 永久", 302: "302 临时", 307: "307 临时", 308: "308 永久" };
@@ -379,6 +398,63 @@ function buildRedirectForm(r, userPwd) {
 }
 function buildRefreshForm(r, userPwd) {
   return `<form method="POST" class="refresh-form"><input type="hidden" name="pwd" value="${escapeAttribute(userPwd)}"><input type="hidden" name="refreshDomain" value="${escapeAttribute(r.domain)}"><input type="hidden" name="currentPort" value="${r.port}"><button class="h-9 w-full rounded-xl border border-amber-300/30 bg-amber-300/10 px-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-300/20 disabled:cursor-wait disabled:opacity-60" type="submit" title="请求 OpenWrt 为该资源重新打洞换端口" aria-label="刷新 ${escapeAttribute(r.domain)} 的端口">刷新</button></form>`;
+}
+function getCopyScript() {
+  return `(() => {
+  const toast = document.createElement('section');
+  toast.className = 'fixed inset-x-4 bottom-24 z-20 max-w-sm rounded-2xl border border-amber-300/25 bg-zinc-900/95 px-4 py-3 text-sm font-medium text-amber-100 shadow-2xl shadow-black/40 ring-1 ring-white/5 sm:left-auto sm:right-6 sm:bottom-28 sm:w-80';
+  toast.hidden = true;
+  document.body.appendChild(toast);
+  const manual = document.createElement('section');
+  manual.className = 'fixed inset-x-4 bottom-4 z-30 max-w-md rounded-2xl border border-amber-300/25 bg-zinc-900/95 p-4 shadow-2xl shadow-black/50 ring-1 ring-white/5 sm:left-auto sm:right-6 sm:w-[26rem]';
+  manual.hidden = true;
+  manual.innerHTML = '<div class="flex items-start justify-between gap-3"><div class="min-w-0"><strong class="block text-sm font-semibold text-zinc-50"></strong><p class="mt-1 text-xs text-zinc-500">浏览器限制剪贴板，请长按或手动复制。</p></div><button type="button" class="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-white/10 text-lg leading-none text-zinc-400 transition hover:bg-white/15 hover:text-zinc-100" aria-label="关闭">×</button></div><textarea class="mt-3 h-20 w-full resize-none rounded-xl border border-amber-300/20 bg-black/40 p-3 text-sm text-amber-100 outline-none focus:border-amber-300/60 focus:ring-4 focus:ring-amber-300/10" readonly></textarea>';
+  document.body.appendChild(manual);
+  manual.querySelector('button').addEventListener('click', () => { manual.hidden = true; });
+  let timer = null;
+  const showToast = (message) => {
+    toast.textContent = message;
+    toast.hidden = false;
+    if (timer) window.clearTimeout(timer);
+    timer = window.setTimeout(() => { toast.hidden = true; }, 1800);
+  };
+  const showManual = (label, text) => {
+    manual.querySelector('strong').textContent = label;
+    const textarea = manual.querySelector('textarea');
+    textarea.value = text;
+    manual.hidden = false;
+    window.setTimeout(() => { textarea.focus(); textarea.select(); }, 0);
+  };
+  const copyText = async (text) => {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const input = document.createElement('textarea');
+    input.value = text;
+    input.setAttribute('readonly', '');
+    input.className = 'fixed -left-[9999px] top-0';
+    document.body.appendChild(input);
+    input.select();
+    const ok = document.execCommand('copy');
+    input.remove();
+    if (!ok) throw new Error('copy failed');
+  };
+  document.addEventListener('click', async (event) => {
+    const button = event.target && event.target.closest ? event.target.closest('.copy-button') : null;
+    if (!button) return;
+    const text = button.dataset.copy || '';
+    const label = button.dataset.copyLabel || '内容';
+    if (!text) return;
+    try {
+      await copyText(text);
+      showToast(label + '已复制');
+    } catch (_) {
+      showToast('复制失败，请手动复制');
+      showManual(label, text);
+    }
+  });
+})();`;
 }
 function getPortalScript() {
   // 门户前端逻辑：本地时区显示、搜索过滤、端口刷新轮询、跳转状态确认。
@@ -451,6 +527,21 @@ function getPortalScript() {
       timer = window.setTimeout(() => { wrap.hidden = true; }, 1800);
     };
   })();
+  const manualCopyCard = (() => {
+    const wrap = document.createElement('section');
+    wrap.className = 'manual-copy fixed inset-x-4 bottom-4 z-30 max-w-md rounded-2xl border border-amber-300/25 bg-zinc-900/95 p-4 shadow-2xl shadow-black/50 ring-1 ring-white/5 sm:left-auto sm:right-6 sm:w-[26rem]';
+    wrap.hidden = true;
+    wrap.innerHTML = '<div class="flex items-start justify-between gap-3"><div class="min-w-0"><strong class="block text-sm font-semibold text-zinc-50"></strong><p class="mt-1 text-xs text-zinc-500">浏览器限制剪贴板，请长按或手动复制。</p></div><button type="button" class="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-white/10 text-lg leading-none text-zinc-400 transition hover:bg-white/15 hover:text-zinc-100" aria-label="关闭">×</button></div><textarea class="mt-3 h-20 w-full resize-none rounded-xl border border-amber-300/20 bg-black/40 p-3 text-sm text-amber-100 outline-none focus:border-amber-300/60 focus:ring-4 focus:ring-amber-300/10" readonly></textarea>';
+    document.body.appendChild(wrap);
+    wrap.querySelector('button').addEventListener('click', () => { wrap.hidden = true; });
+    return (label, text) => {
+      wrap.querySelector('strong').textContent = label;
+      const textarea = wrap.querySelector('textarea');
+      textarea.value = text;
+      wrap.hidden = false;
+      window.setTimeout(() => { textarea.focus(); textarea.select(); }, 0);
+    };
+  })();
   const copyText = async (text) => {
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(text);
@@ -477,7 +568,8 @@ function getPortalScript() {
       await copyText(text);
       copyToast(label + '已复制');
     } catch (_) {
-      copyToast('复制失败，请手动选择');
+      copyToast('复制失败，请手动复制');
+      manualCopyCard(label, text);
     }
   });
   const refreshCard = (() => {
@@ -709,18 +801,22 @@ async function handleSrvRedirect(request, config) {
   const web = getWebServiceRedirect(bestSrv, config);
   const vlessFallback = getVlessFallbackRedirect(bestSrv, config);
   const redirect = web.isWeb ? web : vlessFallback;
-  if (!redirect.canRedirect) return buildNonWebResponse(bestSrv, config);
+  if (!redirect.canRedirect) {
+    const resource = buildResources(managedRecords, config).find((r) => r.domain === bestSrv.hostname && r.service === bestSrv.service && r.protocol === bestSrv.protocol) || addAccessAuthFields(buildResourceBase(bestSrv, config), 0);
+    return buildNonWebResponse(resource, config);
+  }
   const status = globalThis.customRedirectModes[hostname] || config.defaultRedirectStatus;
   return new Response(null, { status, headers: { Location: `${redirect.scheme}://${redirect.target}:${bestSrv.port}${url.pathname}${url.search}`, "Cache-Control": "no-store" } });
 }
 function compareSrvForRedirect(a, b) {
   return getSrvRedirectPriority(a) - getSrvRedirectPriority(b) || a.priority - b.priority || b.weight - a.weight || compareSrvFreshness(a, b);
 }
-function buildNonWebResponse(srv, config = {}) {
-  const localLink = getLocalSchemeLink(srv.service, srv.protocol, srv.target, srv.port);
-  const linkPart = localLink ? `<a class="break-all text-sm font-semibold text-amber-200 underline decoration-amber-300/50 underline-offset-4 hover:text-amber-100" href="${escapeAttribute(localLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(localLink)}</a>` : `<span class="break-all text-zinc-200">${escapeHtml(srv.target)}:${srv.port}</span>`;
-  const debugInfo = config.debugMode && srv.raw ? `<section class="rounded-2xl border border-amber-300/15 bg-zinc-900/90 p-4 shadow-lg shadow-black/20"><h2 class="text-sm font-semibold text-amber-200">DEBUG</h2><pre class="mt-3 max-h-96 overflow-auto rounded-xl border border-amber-300/10 bg-black/60 p-4 text-xs leading-5 text-zinc-300">${escapeHtml(JSON.stringify(srv.raw, null, 2))}</pre></section>` : "";
-  return htmlResponse(`<!doctype html><html lang="zh-CN">${getPageHead("服务信息", config)}<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"><main class="mx-auto flex min-h-screen w-full max-w-2xl flex-col justify-center gap-4 px-4 py-8"><section class="rounded-3xl border border-amber-300/20 bg-zinc-900/90 p-6 shadow-2xl shadow-black/50 ring-1 ring-white/5"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">Non-Web Service</p><h1 class="mt-2 break-all text-2xl font-bold tracking-tight text-zinc-50">${escapeHtml(srv.hostname)}</h1><dl class="mt-6 grid gap-3 text-sm"><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">服务</dt><dd class="font-medium text-zinc-100">${escapeHtml(srv.service)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">协议</dt><dd class="font-medium text-zinc-100">${escapeHtml(srv.protocol)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">目标</dt><dd class="break-all font-medium text-zinc-100">${escapeHtml(srv.target)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">端口</dt><dd><code class="rounded-lg border border-amber-300/15 bg-black/30 px-2 py-1 font-mono text-sm font-semibold text-amber-200">${srv.port}</code></dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">链接</dt><dd class="min-w-0">${linkPart}</dd></div></dl></section>${debugInfo}</main></body></html>`);
+function buildNonWebResponse(resource, config = {}) {
+  const localLink = resource.link || getLocalSchemeLink(resource.service, resource.protocol, resource.target, resource.port);
+  const linkPart = localLink ? `<a class="break-all text-sm font-semibold text-amber-200 underline decoration-amber-300/50 underline-offset-4 hover:text-amber-100" href="${escapeAttribute(localLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(localLink)}</a>` : `<span class="break-all text-zinc-200">${escapeHtml(resource.hostPort)}</span>`;
+  const authPart = resource.authUrl ? `<a class="inline-flex h-9 items-center justify-center rounded-xl border border-amber-300/25 bg-amber-300/10 px-3 text-sm font-semibold text-amber-100 transition hover:bg-amber-300/20" href="${escapeAttribute(resource.authUrl)}" target="_blank" rel="noopener noreferrer">认证</a>` : "";
+  const debugInfo = config.debugMode && resource.raw ? `<section class="rounded-2xl border border-amber-300/15 bg-zinc-900/90 p-4 shadow-lg shadow-black/20"><h2 class="text-sm font-semibold text-amber-200">DEBUG</h2><pre class="mt-3 max-h-96 overflow-auto rounded-xl border border-amber-300/10 bg-black/60 p-4 text-xs leading-5 text-zinc-300">${escapeHtml(JSON.stringify(resource.raw, null, 2))}</pre></section>` : "";
+  return htmlResponse(`<!doctype html><html lang="zh-CN">${getPageHead("服务信息", config)}<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"><main class="mx-auto flex min-h-screen w-full max-w-2xl flex-col justify-center gap-4 px-4 py-8"><section class="rounded-3xl border border-amber-300/20 bg-zinc-900/90 p-6 shadow-2xl shadow-black/50 ring-1 ring-white/5"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">Non-Web Service</p><h1 class="mt-2 break-all text-2xl font-bold tracking-tight text-zinc-50">${escapeHtml(resource.domain)}</h1><dl class="mt-6 grid gap-3 text-sm"><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">服务</dt><dd class="font-medium text-zinc-100">${escapeHtml(resource.service)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">协议</dt><dd class="font-medium text-zinc-100">${escapeHtml(resource.protocol)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">目标</dt><dd class="break-all font-medium text-zinc-100">${escapeHtml(resource.target)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">端口</dt><dd><code class="rounded-lg border border-amber-300/15 bg-black/30 px-2 py-1 font-mono text-sm font-semibold text-amber-200">${resource.port}</code></dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">链接</dt><dd class="min-w-0">${linkPart}</dd></div></dl><div class="mt-6 flex flex-wrap gap-2">${buildCopyButton(resource.port, "端口", "复制端口")}${buildCopyButton(resource.hostPort, "Host", "复制 Host Port")}${localLink ? buildCopyButton(localLink, "URL", "复制完整 URL") : ""}${authPart}</div></section>${debugInfo}<script>${getCopyScript()}</script></main></body></html>`);
 }
 
 function getWebServiceRedirect(record, config) {

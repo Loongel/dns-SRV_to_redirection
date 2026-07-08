@@ -8,6 +8,7 @@ It provides:
 - Redirects for web services based on SRV targets and ports.
 - Treats `_vless_FB` SRV services as independent HTTPS fallback redirect endpoints.
 - Wildcard dynamic redirects using a configurable template Web service.
+- Copy actions for port, full URL, and `host:port`, plus a per-resource HTTPS authorization entry.
 - A manual "refresh port" action that asks OpenWrt natmap to restart one matching section.
 - A natmap agent that polls a DNS TXT refresh queue, performs health checks, and restarts unhealthy sections.
 - A Cloudflare DDNS script that replaces old same-name records before adding new records, avoiding duplicate stale SRV entries.
@@ -117,6 +118,7 @@ The agent works with defaults, but these can be exported before running it:
 - If `ACCESS_AUTH_SELF_CHECK_TOKEN` is configured, each health round attempts one HTTPS token login through an enabled TCP tunnel before probes. Success or failure is logged only and never changes the original health logic.
 - Worker force-refresh and manual refresh APIs require the portal password and have in-memory rate limits.
 - Manual browser refresh after clicking "refresh port" does not repeat the action; POST fallback uses `303 See Other`.
+- Portal authorization buttons open `https://<target>:<auth-port>/`. UDP resources reuse the first available non-UDP resource port for authorization because their own public port may not serve HTTPS.
 - `_vless_fb` is probed as HTTPS fallback using the derived fallback hostname, while plain VLESS still defaults to TCP connect. UDP services are not generically probeable; add service-specific scripts under `/etc/natmap/health.d/` for HY2, QUIC, game protocols, and similar services.
 
 ## Documentation
