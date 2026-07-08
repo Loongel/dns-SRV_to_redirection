@@ -874,7 +874,7 @@ function getLocalSchemeLink(service, protocol, target, port) {
   if (s.includes("_ssh")) return `ssh://${target}:${port}`;
   if (s.includes("_sftp")) return `sftp://${target}:${port}`;
   if (s.includes("_ftp")) return `ftp://${target}:${port}`;
-  if (s.includes("_rdp")) return `rdp://${target}:${port}`;
+  if (s.includes("_rdp")) return `rdp://full%20address=s:${target}:${port}`;
   if (s.includes("_vnc")) return `vnc://${target}:${port}`;
   return "";
 }

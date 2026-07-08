@@ -76,10 +76,26 @@ function vlessFallbackSrvRecord() {
   };
 }
 
+function rdpSrvRecord() {
+  return {
+    id: "srv-rdp",
+    name: "_rdp._tcp.z-rdp.s.example.com",
+    type: "SRV",
+    created_on: "2026-05-26T00:00:00Z",
+    modified_on: "2026-05-26T00:04:00Z",
+    data: {
+      priority: 0,
+      weight: 0,
+      port: 3389,
+      target: "rdp.n.example.com",
+    },
+  };
+}
+
 globalThis.fetch = async (url, init = {}) => {
   const u = new URL(url);
   if (u.searchParams.get("type") === "SRV") {
-    return Response.json({ success: true, result: [srvRecord(), webSrvRecord(), portalSrvRecord(), vlessFallbackSrvRecord()], result_info: { page: 1, total_pages: 1 } });
+    return Response.json({ success: true, result: [srvRecord(), webSrvRecord(), portalSrvRecord(), vlessFallbackSrvRecord(), rdpSrvRecord()], result_info: { page: 1, total_pages: 1 } });
   }
   if (u.searchParams.get("type") === "TXT") {
     return Response.json({ success: true, result: [{ id: "old-txt-1" }, { id: "old-txt-2" }] });
@@ -107,7 +123,7 @@ if (oldCdnHtml.includes("cdn.bootcdn.net") || !oldCdnHtml.includes("fastly.jsdel
 const customCdnPortal = await worker.fetch(new Request("https://s.example.com/?pwd=secret"), { ...env, TAILWIND_CDN_URLS: "https://fast.example/tailwind.js,https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/dist/index.global.min.js" }, {});
 const customCdnHtml = await customCdnPortal.text();
 if (!customCdnHtml.includes("https://fast.example/tailwind.js") || customCdnHtml.indexOf("https://fast.example/tailwind.js") > customCdnHtml.indexOf("cdn.jsdelivr.net")) throw new Error("custom domestic CDN should keep first priority");
-for (const needle of ["@tailwindcss/browser", "resourceSearch", "refresh-card", "copy-button", "copyToast", "manual-copy", "navigator.clipboard", "复制完整 URL", "复制端口", "复制 Host Port", ">认证</a>", "data-copy=\"2424\"", "data-copy=\"web.n.example.com:2424\"", "href=\"https://web.n.example.com:2424/\"", "href=\"https://n.example.com:3434/\"", "浏览器时区", "data-time=\"2026-05-26T"]) {
+for (const needle of ["@tailwindcss/browser", "resourceSearch", "refresh-card", "copy-button", "copyToast", "manual-copy", "navigator.clipboard", "复制完整 URL", "复制端口", "复制 Host Port", ">认证</a>", "data-copy=\"2424\"", "data-copy=\"web.n.example.com:2424\"", "rdp://full%20address=s:rdp.n.example.com:3389", "href=\"https://web.n.example.com:2424/\"", "href=\"https://n.example.com:3434/\"", "浏览器时区", "data-time=\"2026-05-26T"]) {
   if (!html.includes(needle)) throw new Error(`portal missing ${needle}`);
 }
 if (html.includes("<style") || html.includes("style=")) throw new Error("portal should use Tailwind CDN without inline styles");
@@ -165,9 +181,11 @@ if (!json1.ok || json1.resources[0].port !== 24467) throw new Error("initial res
 const hy2Resource = json1.resources.find((r) => r.domain === "hm-hy2.s.example.com");
 const webResource = json1.resources.find((r) => r.domain === "web.s.example.com");
 const vlessFbResource = json1.resources.find((r) => r.domain === "vless-fb.s.example.com");
+const rdpResource = json1.resources.find((r) => r.domain === "z-rdp.s.example.com");
 if (hy2Resource.hostPort !== "n.example.com:24467" || hy2Resource.authUrl !== "https://n.example.com:3434/") throw new Error("UDP auth fallback or hostPort mismatch");
 if (webResource.hostPort !== "web.n.example.com:2424" || webResource.authUrl !== "https://web.n.example.com:2424/") throw new Error("web auth URL mismatch");
 if (vlessFbResource.hostPort !== "vless-fb.n.example.com:8443" || vlessFbResource.authUrl !== "https://vless-fb.n.example.com:8443/") throw new Error("vless_fb auth URL mismatch");
+if (rdpResource.link !== "rdp://full%20address=s:rdp.n.example.com:3389") throw new Error("RDP URI mismatch");
 
 const refresh = await worker.fetch(new Request("https://s.example.com/api/refresh", {
   method: "POST",
