@@ -123,7 +123,7 @@ if (oldCdnHtml.includes("cdn.bootcdn.net") || !oldCdnHtml.includes("fastly.jsdel
 const customCdnPortal = await worker.fetch(new Request("https://s.example.com/?pwd=secret"), { ...env, TAILWIND_CDN_URLS: "https://fast.example/tailwind.js,https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/dist/index.global.min.js" }, {});
 const customCdnHtml = await customCdnPortal.text();
 if (!customCdnHtml.includes("https://fast.example/tailwind.js") || customCdnHtml.indexOf("https://fast.example/tailwind.js") > customCdnHtml.indexOf("cdn.jsdelivr.net")) throw new Error("custom domestic CDN should keep first priority");
-for (const needle of ["@tailwindcss/browser", "resourceSearch", "refresh-card", "copy-button", "copyToast", "manual-copy", "navigator.clipboard", "复制完整 URL", "复制端口", "复制 Host Port", ">认证</a>", "data-copy=\"2424\"", "data-copy=\"web.n.example.com:2424\"", "rdp://full%20address=s:rdp.n.example.com:3389", "href=\"https://web.n.example.com:2424/\"", "href=\"https://n.example.com:3434/\"", "浏览器时区", "data-time=\"2026-05-26T"]) {
+for (const needle of ["@tailwindcss/browser", "resourceSearch", "refresh-card", "copy-button", "copyToast", "manual-copy", "navigator.clipboard", "复制完整 URL", "复制端口", "复制 Host Port", ">认证</a>", ">下载</a>", "download=\"z-rdp.s.example.com.rdp\"", "full%20address%3As%3Ardp.n.example.com%3A3389", "href=\"https://hm-hy2.s.example.com/\"", "data-copy=\"2424\"", "data-copy=\"web.n.example.com:2424\"", "rdp://full%20address=s:rdp.n.example.com:3389", "href=\"https://web.n.example.com:2424/\"", "href=\"https://n.example.com:3434/\"", "浏览器时区", "data-time=\"2026-05-26T"]) {
   if (!html.includes(needle)) throw new Error(`portal missing ${needle}`);
 }
 if (html.includes("<style") || html.includes("style=")) throw new Error("portal should use Tailwind CDN without inline styles");
@@ -144,7 +144,7 @@ const nonWebHtml = await nonWeb.text();
 if (!nonWebHtml.includes("@tailwindcss/browser") || nonWebHtml.includes("<style") || nonWebHtml.includes("style=")) {
   throw new Error("non-web page should use Tailwind CDN without inline styles");
 }
-for (const needle of ["复制 Host Port", "data-copy=\"n.example.com:24467\"", "href=\"https://n.example.com:3434/\"", "浏览器限制剪贴板"]) {
+for (const needle of ["复制 Host Port", "data-copy=\"hm-hy2.s.example.com\"", "data-copy=\"n.example.com:24467\"", "href=\"https://n.example.com:3434/\"", "浏览器限制剪贴板"]) {
   if (!nonWebHtml.includes(needle)) throw new Error(`non-web page missing ${needle}`);
 }
 
@@ -186,6 +186,7 @@ if (hy2Resource.hostPort !== "n.example.com:24467" || hy2Resource.authUrl !== "h
 if (webResource.hostPort !== "web.n.example.com:2424" || webResource.authUrl !== "https://web.n.example.com:2424/") throw new Error("web auth URL mismatch");
 if (vlessFbResource.hostPort !== "vless-fb.n.example.com:8443" || vlessFbResource.authUrl !== "https://vless-fb.n.example.com:8443/") throw new Error("vless_fb auth URL mismatch");
 if (rdpResource.link !== "rdp://full%20address=s:rdp.n.example.com:3389") throw new Error("RDP URI mismatch");
+if (rdpResource.rdpFileName !== "z-rdp.s.example.com.rdp" || !rdpResource.rdpFileUrl.includes("full%20address%3As%3Ardp.n.example.com%3A3389")) throw new Error("RDP download metadata mismatch");
 
 const refresh = await worker.fetch(new Request("https://s.example.com/api/refresh", {
   method: "POST",

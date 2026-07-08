@@ -10,6 +10,8 @@ It provides:
 - Wildcard dynamic redirects using a configurable template Web service.
 - Copy actions for port, full URL, and `host:port`, plus a per-resource HTTPS authorization entry.
 - RDP links use Microsoft Remote Desktop URI format: `rdp://full%20address=s:<host>:<port>`.
+- RDP resources expose a `.rdp` download button with the same `full address` target.
+- Non-web resource names open their HTTPS service-info page from the portal; clicking the name again on that page copies the domain.
 - A manual "refresh port" action that asks OpenWrt natmap to restart one matching section.
 - A natmap agent that polls a DNS TXT refresh queue, performs health checks, and restarts unhealthy sections.
 - A Cloudflare DDNS script that replaces old same-name records before adding new records, avoiding duplicate stale SRV entries.
