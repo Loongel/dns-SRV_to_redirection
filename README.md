@@ -9,8 +9,9 @@ It provides:
 - Treats `_vless_FB` SRV services as independent HTTPS fallback redirect endpoints.
 - Wildcard dynamic redirects using a configurable template Web service.
 - Copy actions for port, full URL, and `host:port`, plus a per-resource HTTPS authorization entry.
-- RDP links use Microsoft Remote Desktop URI format: `rdp://full%20address=s:<host>:<port>`.
-- RDP resources expose a `.rdp` download button with the same `full address` target.
+- Shared public targets such as `n.example.com` are expanded with the resource prefix for links and generated files, for example `win11.s.example.com` -> `win11.n.example.com`.
+- RDP links use Microsoft Remote Desktop URI format: `rdp://full%20address=s:<host>:<port>`, with an options dialog for fullscreen and detected screen size.
+- RDP resources expose a `.rdp` download button. The generated file includes fullscreen/windowed mode, detected or selected resolution, dynamic resolution, and smart sizing options.
 - Non-web resource names open their HTTPS service-info page from the portal; clicking the name again on that page copies the domain.
 - A manual "refresh port" action that asks OpenWrt natmap to restart one matching section.
 - A natmap agent that polls a DNS TXT refresh queue, performs health checks, and restarts unhealthy sections.

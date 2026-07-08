@@ -330,8 +330,8 @@ function buildResourceBase(record, config) {
   const web = getWebServiceRedirect(record, config);
   const vlessFallback = getVlessFallbackRedirect(record, config);
   const redirect = web.isWeb ? web : vlessFallback;
-  const target = redirect.canRedirect ? redirect.target : record.target;
-  const link = redirect.canRedirect ? `${redirect.scheme}://${target}:${record.port}` : getLocalSchemeLink(record.service, record.protocol, record.target, record.port);
+  const target = resolvePrefixedTarget(record.hostname, redirect.canRedirect ? redirect.target : record.target, config);
+  const link = redirect.canRedirect ? `${redirect.scheme}://${target}:${record.port}` : getLocalSchemeLink(record.service, record.protocol, target, record.port);
   return { domain: record.hostname, service: record.service, protocol: record.protocol, target, port: record.port, link, isWeb: web.isWeb, isVlessFallback: vlessFallback.canRedirect, updatedAt: record.updatedAt, updatedIso: record.updatedAt ? new Date(record.updatedAt).toISOString() : "", updatedLabel: formatRecordTime(record.updatedAt), redirectStatus: globalThis.customRedirectModes[record.hostname] || config.defaultRedirectStatus, raw: config.debugMode ? record.raw : undefined };
 }
 function addAccessAuthFields(resource, fallbackAuthPort) {
@@ -350,11 +350,28 @@ function isRdpService(service) {
 function isNonWebInfoResource(resource) {
   return !resource.isWeb && !resource.isVlessFallback;
 }
+function resolvePrefixedTarget(hostname, target, config) {
+  const portalDomain = String(config.portalDomain || "").toLowerCase();
+  const normalizedHostname = normalizeHostname(hostname);
+  const normalizedTarget = normalizeHostname(target);
+  if (!portalDomain || !normalizedHostname.endsWith(`.${portalDomain}`)) return normalizedTarget;
+  const subdomain = normalizedHostname.slice(0, -(portalDomain.length + 1));
+  if (!subdomain || subdomain.includes(".") || normalizedTarget.startsWith(`${subdomain}.`)) return normalizedTarget;
+  const parentDomain = portalDomain.split(".").slice(1).join(".");
+  if (!parentDomain || !normalizedTarget.endsWith(`.${parentDomain}`)) return normalizedTarget;
+  const targetPrefix = normalizedTarget.slice(0, -(parentDomain.length + 1));
+  if (!targetPrefix || targetPrefix.includes(".") || targetPrefix === subdomain) return normalizedTarget;
+  return `${subdomain}.${normalizedTarget}`;
+}
 function addRdpDownloadFields(resource) {
   const content = [
     `full address:s:${resource.target}:${resource.port}`,
     "prompt for credentials:i:1",
     "screen mode id:i:2",
+    "desktopwidth:i:1920",
+    "desktopheight:i:1080",
+    "dynamic resolution:i:1",
+    "smart sizing:i:1",
     "use multimon:i:0",
   ].join("\r\n") + "\r\n";
   const fileName = `${resource.domain.replace(/[^a-z0-9_.-]+/gi, "_")}.rdp`;
@@ -382,7 +399,7 @@ function buildPortalPageHTML(resources, config, userPwd, notice = "") {
   const emptyState = resources.length ? "" : `<section class="rounded-2xl border border-dashed border-amber-300/25 bg-zinc-900/60 px-5 py-10 text-center text-sm text-zinc-400">未找到匹配的 SRV 记录。</section>`;
   const warningHtml = warnings.map((w) => `<section class="rounded-2xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">${escapeHtml(w)}</section>`).join("");
   const noticeHtml = notice ? `<section class="rounded-2xl border border-amber-300/30 bg-amber-300/10 px-4 py-3 text-sm font-medium text-amber-100">${escapeHtml(notice)}</section>` : "";
-  return htmlResponse(`<!doctype html><html lang="zh-CN">${getPageHead("资源门户", config)}<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"><main class="mx-auto flex w-full max-w-7xl flex-col gap-5 bg-[radial-gradient(circle_at_top_left,rgba(251,191,36,0.12),transparent_32%)] px-4 py-5 sm:px-6 lg:px-8"><header class="flex flex-col gap-5 rounded-3xl border border-amber-300/20 bg-zinc-950/80 p-5 shadow-2xl shadow-black/50 ring-1 ring-amber-100/5 backdrop-blur sm:flex-row sm:items-end sm:justify-between"><div class="min-w-0"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">NATMap SRV Portal</p><h1 class="mt-1 text-2xl font-bold tracking-tight text-zinc-50 sm:text-3xl">资源门户</h1></div><div class="grid grid-cols-3 gap-2 text-center sm:min-w-80"><span class="rounded-2xl border border-amber-300/20 bg-black/30 px-3 py-2"><strong class="block text-lg font-bold text-amber-200">${resources.length}</strong><span class="text-xs text-zinc-500">可用</span></span><span class="rounded-2xl border border-amber-300/20 bg-black/30 px-3 py-2"><strong class="block text-lg font-bold text-amber-200">${cache.duplicateCount || 0}</strong><span class="text-xs text-zinc-500">折叠</span></span><span class="rounded-2xl border border-amber-300/20 bg-black/30 px-3 py-2"><strong class="block text-lg font-bold text-amber-200">${formatCacheTime(cache.fetchedAt)}</strong><span class="text-xs text-zinc-500">更新</span></span></div></header>${noticeHtml}${warningHtml}${emptyState}<section class="rounded-2xl border border-amber-300/15 bg-zinc-950/70 p-4 shadow-lg shadow-black/30 ring-1 ring-white/5"><label class="flex w-full flex-col gap-2 md:max-w-2xl"><span class="text-xs font-semibold text-zinc-500">搜索</span><input id="resourceSearch" class="h-11 rounded-xl border border-amber-300/20 bg-black/35 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-amber-300/70 focus:ring-4 focus:ring-amber-300/10" type="search" placeholder="输入域名、服务、端口或目标" autocomplete="off"></label></section><section class="hidden overflow-hidden rounded-2xl border border-amber-300/15 bg-zinc-950/75 shadow-2xl shadow-black/40 ring-1 ring-white/5 xl:block"><div class="overflow-x-auto"><table class="w-full min-w-[1120px] table-fixed border-collapse"><colgroup><col class="w-[17%]"><col class="w-[10%]"><col class="w-[14%]"><col class="w-[10%]"><col class="w-[12%]"><col class="w-[16%]"><col class="w-[11%]"><col class="w-[10%]"></colgroup><thead class="bg-black/45 text-xs font-semibold uppercase tracking-wide text-zinc-500"><tr><th class="px-4 py-3 text-left">域名</th><th class="px-4 py-3 text-left">服务</th><th class="px-4 py-3 text-left">目标</th><th class="px-4 py-3 text-left">端口</th><th class="px-4 py-3 text-left">记录时间</th><th class="px-4 py-3 text-left">链接</th><th class="px-4 py-3 text-left">跳转</th><th class="px-4 py-3 text-left">刷新</th></tr></thead><tbody class="divide-y divide-amber-300/10 text-sm">${rows}</tbody></table></div></section><section class="grid gap-3 md:grid-cols-2 xl:hidden">${cards}</section>${debug}<script>${getPortalScript()}</script></main></body></html>`);
+  return htmlResponse(`<!doctype html><html lang="zh-CN">${getPageHead("资源门户", config)}<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"><main class="mx-auto flex w-full max-w-7xl flex-col gap-5 bg-[radial-gradient(circle_at_top_left,rgba(251,191,36,0.12),transparent_32%)] px-4 py-5 sm:px-6 lg:px-8"><header class="flex flex-col gap-5 rounded-3xl border border-amber-300/20 bg-zinc-950/80 p-5 shadow-2xl shadow-black/50 ring-1 ring-amber-100/5 backdrop-blur sm:flex-row sm:items-end sm:justify-between"><div class="min-w-0"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">NATMap SRV Portal</p><h1 class="mt-1 text-2xl font-bold tracking-tight text-zinc-50 sm:text-3xl">资源门户</h1></div><div class="grid grid-cols-3 gap-2 text-center sm:min-w-80"><span class="rounded-2xl border border-amber-300/20 bg-black/30 px-3 py-2"><strong class="block text-lg font-bold text-amber-200">${resources.length}</strong><span class="text-xs text-zinc-500">可用</span></span><span class="rounded-2xl border border-amber-300/20 bg-black/30 px-3 py-2"><strong class="block text-lg font-bold text-amber-200">${cache.duplicateCount || 0}</strong><span class="text-xs text-zinc-500">折叠</span></span><span class="rounded-2xl border border-amber-300/20 bg-black/30 px-3 py-2"><strong class="block text-lg font-bold text-amber-200">${formatCacheTime(cache.fetchedAt)}</strong><span class="text-xs text-zinc-500">更新</span></span></div></header>${noticeHtml}${warningHtml}${emptyState}<section class="rounded-2xl border border-amber-300/15 bg-zinc-950/70 p-4 shadow-lg shadow-black/30 ring-1 ring-white/5"><label class="flex w-full flex-col gap-2 md:max-w-2xl"><span class="text-xs font-semibold text-zinc-500">搜索</span><input id="resourceSearch" class="h-11 rounded-xl border border-amber-300/20 bg-black/35 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-amber-300/70 focus:ring-4 focus:ring-amber-300/10" type="search" placeholder="输入域名、服务、端口或目标" autocomplete="off"></label></section><section class="hidden overflow-hidden rounded-2xl border border-amber-300/15 bg-zinc-950/75 shadow-2xl shadow-black/40 ring-1 ring-white/5 xl:block"><div class="overflow-x-auto"><table class="w-full min-w-[1120px] table-fixed border-collapse"><colgroup><col class="w-[17%]"><col class="w-[10%]"><col class="w-[14%]"><col class="w-[10%]"><col class="w-[12%]"><col class="w-[16%]"><col class="w-[11%]"><col class="w-[10%]"></colgroup><thead class="bg-black/45 text-xs font-semibold uppercase tracking-wide text-zinc-500"><tr><th class="px-4 py-3 text-left">域名</th><th class="px-4 py-3 text-left">服务</th><th class="px-4 py-3 text-left">目标</th><th class="px-4 py-3 text-left">端口</th><th class="px-4 py-3 text-left">记录时间</th><th class="px-4 py-3 text-left">链接</th><th class="px-4 py-3 text-left">跳转</th><th class="px-4 py-3 text-left">刷新</th></tr></thead><tbody class="divide-y divide-amber-300/10 text-sm">${rows}</tbody></table></div></section><section class="grid gap-3 md:grid-cols-2 xl:hidden">${cards}</section>${debug}<script>${getPortalScript()}</script><script>${getRdpScript()}</script></main></body></html>`);
 }
 function buildResourceRow(r, userPwd) {
   const search = `${r.domain} ${r.service} ${r.protocol} ${r.target} ${r.port}`.toLowerCase();
@@ -404,8 +421,11 @@ function buildPortCopyHtml(r) {
 }
 function buildLinkHtml(r) {
   const value = r.link || `${r.target}:${r.port}`;
-  const content = r.link ? `<a class="block truncate text-sm font-semibold text-amber-200 underline decoration-amber-300/50 underline-offset-4 hover:text-amber-100" href="${escapeAttribute(r.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.link)}</a>` : `<span class="block truncate text-sm text-zinc-500">${escapeHtml(value)}</span>`;
+  const content = r.rdpFileUrl ? buildRdpOpenLink(r, "block truncate text-sm font-semibold text-amber-200 underline decoration-amber-300/50 underline-offset-4 hover:text-amber-100") : (r.link ? `<a class="block truncate text-sm font-semibold text-amber-200 underline decoration-amber-300/50 underline-offset-4 hover:text-amber-100" href="${escapeAttribute(r.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.link)}</a>` : `<span class="block truncate text-sm text-zinc-500">${escapeHtml(value)}</span>`);
   return `<div class="grid min-w-0 gap-2">${content}<div class="flex min-w-0 flex-wrap items-center gap-2">${buildCopyButton(value, "URL", r.link ? "复制完整 URL" : "复制地址")}${buildCopyButton(r.hostPort, "Host", "复制 Host Port")}${buildAuthLink(r)}${buildRdpDownloadLink(r)}</div></div>`;
+}
+function buildRdpOpenLink(r, className) {
+  return `<a class="${className}" href="${escapeAttribute(r.link)}" data-rdp-action="open" data-rdp-target="${escapeAttribute(r.target)}" data-rdp-port="${r.port}" data-rdp-file="${escapeAttribute(r.rdpFileName || "remote.rdp")}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.link)}</a>`;
 }
 function buildAuthLink(r) {
   if (!r.authUrl) return "";
@@ -413,7 +433,7 @@ function buildAuthLink(r) {
 }
 function buildRdpDownloadLink(r) {
   if (!r.rdpFileUrl) return "";
-  return `<a class="inline-flex h-8 shrink-0 items-center justify-center rounded-xl border border-amber-300/25 bg-black/35 px-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-300/10 hover:text-amber-100 focus:outline-none focus:ring-4 focus:ring-amber-300/10" href="${escapeAttribute(r.rdpFileUrl)}" download="${escapeAttribute(r.rdpFileName || "remote.rdp")}" title="下载 RDP 配置文件" aria-label="下载 ${escapeAttribute(r.domain)} 的 RDP 配置文件">下载</a>`;
+  return `<a class="inline-flex h-8 shrink-0 items-center justify-center rounded-xl border border-amber-300/25 bg-black/35 px-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-300/10 hover:text-amber-100 focus:outline-none focus:ring-4 focus:ring-amber-300/10" href="${escapeAttribute(r.rdpFileUrl)}" download="${escapeAttribute(r.rdpFileName || "remote.rdp")}" data-rdp-action="download" data-rdp-target="${escapeAttribute(r.target)}" data-rdp-port="${r.port}" data-rdp-file="${escapeAttribute(r.rdpFileName || "remote.rdp")}" title="下载 RDP 配置文件" aria-label="下载 ${escapeAttribute(r.domain)} 的 RDP 配置文件">下载</a>`;
 }
 function buildRedirectForm(r, userPwd) {
   const labels = { 301: "301 永久", 302: "302 临时", 307: "307 临时", 308: "308 永久" };
@@ -478,6 +498,117 @@ function getCopyScript() {
       showToast('复制失败，请手动复制');
       showManual(label, text);
     }
+  });
+})();`;
+}
+function getRdpScript() {
+  return `(() => {
+  const detectedResolution = () => {
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.max(640, Math.round((screen.width || innerWidth || 1920) * ratio));
+    const height = Math.max(480, Math.round((screen.height || innerHeight || 1080) * ratio));
+    return { width, height };
+  };
+  const modal = (() => {
+    const detected = detectedResolution();
+    const wrap = document.createElement('section');
+    wrap.className = 'rdp-options fixed inset-0 z-40 hidden items-end justify-center bg-black/75 p-4 backdrop-blur-sm sm:items-center';
+    wrap.innerHTML = '<div class="w-full max-w-lg rounded-2xl border border-amber-300/25 bg-zinc-950 p-5 shadow-2xl shadow-black/70 ring-1 ring-amber-100/10"><div class="flex items-start justify-between gap-4"><div class="min-w-0"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">RDP Options</p><h2 class="mt-1 text-lg font-bold text-zinc-50">远程桌面连接选项</h2><p class="mt-1 break-all text-xs text-zinc-500" data-rdp-host></p></div><button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white/10 text-lg leading-none text-zinc-400 transition hover:bg-white/15 hover:text-zinc-100" data-rdp-cancel aria-label="关闭">×</button></div><div class="mt-5 grid gap-4"><label class="grid gap-2 text-sm"><span class="font-semibold text-zinc-300">分辨率</span><select class="h-10 rounded-xl border border-amber-300/20 bg-black/40 px-3 text-sm text-amber-100 outline-none focus:border-amber-300/60 focus:ring-4 focus:ring-amber-300/10" data-rdp-resolution></select></label><div class="grid grid-cols-2 gap-2"><label class="grid gap-2 text-sm"><span class="font-semibold text-zinc-300">宽度</span><input class="h-10 rounded-xl border border-amber-300/20 bg-black/40 px-3 text-sm text-amber-100 outline-none focus:border-amber-300/60 focus:ring-4 focus:ring-amber-300/10" data-rdp-width inputmode="numeric"></label><label class="grid gap-2 text-sm"><span class="font-semibold text-zinc-300">高度</span><input class="h-10 rounded-xl border border-amber-300/20 bg-black/40 px-3 text-sm text-amber-100 outline-none focus:border-amber-300/60 focus:ring-4 focus:ring-amber-300/10" data-rdp-height inputmode="numeric"></label></div><div class="grid gap-2 text-sm text-zinc-300"><label class="flex items-center gap-2"><input class="h-4 w-4 accent-amber-300" type="checkbox" data-rdp-fullscreen checked><span>自动全屏</span></label><label class="flex items-center gap-2"><input class="h-4 w-4 accent-amber-300" type="checkbox" data-rdp-dynamic checked><span>动态分辨率（下载 .rdp 生效）</span></label><label class="flex items-center gap-2"><input class="h-4 w-4 accent-amber-300" type="checkbox" data-rdp-smart checked><span>自动缩放（下载 .rdp 生效）</span></label></div></div><div class="mt-5 grid grid-cols-2 gap-2"><button type="button" class="h-10 rounded-xl border border-amber-300/20 bg-black/30 px-3 text-sm font-semibold text-zinc-300 transition hover:bg-white/10 hover:text-zinc-100" data-rdp-cancel>取消</button><button type="button" class="h-10 rounded-xl bg-amber-300 px-3 text-sm font-semibold text-zinc-950 transition hover:bg-amber-200 focus:outline-none focus:ring-4 focus:ring-amber-300/20" data-rdp-confirm>继续</button></div></div>';
+    document.body.appendChild(wrap);
+    const resolution = wrap.querySelector('[data-rdp-resolution]');
+    const presets = [
+      ['detected', '当前设备 ' + detected.width + ' × ' + detected.height, detected.width, detected.height],
+      ['1920x1080', '1920 × 1080', 1920, 1080],
+      ['2560x1440', '2560 × 1440', 2560, 1440],
+      ['3840x2160', '3840 × 2160', 3840, 2160],
+      ['1366x768', '1366 × 768', 1366, 768],
+      ['1280x720', '1280 × 720', 1280, 720],
+      ['custom', '自定义', detected.width, detected.height]
+    ];
+    resolution.innerHTML = presets.map((item) => '<option value="' + item[0] + '" data-width="' + item[2] + '" data-height="' + item[3] + '">' + item[1] + '</option>').join('');
+    const widthInput = wrap.querySelector('[data-rdp-width]');
+    const heightInput = wrap.querySelector('[data-rdp-height]');
+    const setSize = (width, height) => {
+      widthInput.value = String(width);
+      heightInput.value = String(height);
+    };
+    setSize(detected.width, detected.height);
+    resolution.addEventListener('change', () => {
+      const option = resolution.options[resolution.selectedIndex];
+      if (!option || resolution.value === 'custom') return;
+      setSize(option.dataset.width || detected.width, option.dataset.height || detected.height);
+    });
+    const close = () => {
+      wrap.classList.add('hidden');
+      wrap.classList.remove('flex');
+      modal.pending = null;
+    };
+    wrap.querySelectorAll('[data-rdp-cancel]').forEach((button) => button.addEventListener('click', close));
+    wrap.addEventListener('click', (event) => { if (event.target === wrap) close(); });
+    window.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !wrap.classList.contains('hidden')) close(); });
+    wrap.querySelector('[data-rdp-confirm]').addEventListener('click', () => {
+      const pending = modal.pending;
+      if (!pending) return;
+      const options = {
+        width: normalizeInt(widthInput.value, detected.width),
+        height: normalizeInt(heightInput.value, detected.height),
+        fullscreen: wrap.querySelector('[data-rdp-fullscreen]').checked,
+        dynamic: wrap.querySelector('[data-rdp-dynamic]').checked,
+        smart: wrap.querySelector('[data-rdp-smart]').checked
+      };
+      close();
+      if (pending.action === 'download') downloadRdpFile(pending, options);
+      else window.location.href = buildRdpUri(pending, options);
+    });
+    return {
+      pending: null,
+      open(pending) {
+        this.pending = pending;
+        wrap.querySelector('[data-rdp-host]').textContent = pending.target + ':' + pending.port;
+        wrap.classList.remove('hidden');
+        wrap.classList.add('flex');
+        wrap.querySelector('[data-rdp-confirm]').textContent = pending.action === 'download' ? '下载' : '打开';
+        wrap.querySelector('[data-rdp-confirm]').focus();
+      }
+    };
+  })();
+  const normalizeInt = (value, fallback) => {
+    const parsed = parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  };
+  const screenMode = (options) => options.fullscreen ? 2 : 1;
+  const buildRdpUri = (rdp, options) => 'rdp://full%20address=s:' + rdp.target + ':' + rdp.port + '&screenmodeid=i:' + screenMode(options) + '&screenwidth=i:' + options.width + '&screenheight=i:' + options.height;
+  const buildRdpFile = (rdp, options) => [
+    'full address:s:' + rdp.target + ':' + rdp.port,
+    'prompt for credentials:i:1',
+    'screen mode id:i:' + screenMode(options),
+    'desktopwidth:i:' + options.width,
+    'desktopheight:i:' + options.height,
+    'dynamic resolution:i:' + (options.dynamic ? 1 : 0),
+    'smart sizing:i:' + (options.smart ? 1 : 0),
+    'use multimon:i:0'
+  ].join('\\r\\n') + '\\r\\n';
+  const downloadRdpFile = (rdp, options) => {
+    const blob = new Blob([buildRdpFile(rdp, options)], { type: 'application/x-rdp;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = rdp.file || 'remote.rdp';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  document.addEventListener('click', (event) => {
+    const link = event.target && event.target.closest ? event.target.closest('[data-rdp-action]') : null;
+    if (!link) return;
+    event.preventDefault();
+    modal.open({
+      action: link.dataset.rdpAction || 'open',
+      target: link.dataset.rdpTarget || '',
+      port: link.dataset.rdpPort || '',
+      file: link.dataset.rdpFile || 'remote.rdp'
+    });
   });
 })();`;
 }
@@ -841,13 +972,13 @@ function buildNonWebResponse(resource, config = {}) {
   const linkPart = localLink ? `<a class="break-all text-sm font-semibold text-amber-200 underline decoration-amber-300/50 underline-offset-4 hover:text-amber-100" href="${escapeAttribute(localLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(localLink)}</a>` : `<span class="break-all text-zinc-200">${escapeHtml(resource.hostPort)}</span>`;
   const authPart = resource.authUrl ? `<a class="inline-flex h-9 items-center justify-center rounded-xl border border-amber-300/25 bg-amber-300/10 px-3 text-sm font-semibold text-amber-100 transition hover:bg-amber-300/20" href="${escapeAttribute(resource.authUrl)}" target="_blank" rel="noopener noreferrer">认证</a>` : "";
   const debugInfo = config.debugMode && resource.raw ? `<section class="rounded-2xl border border-amber-300/15 bg-zinc-900/90 p-4 shadow-lg shadow-black/20"><h2 class="text-sm font-semibold text-amber-200">DEBUG</h2><pre class="mt-3 max-h-96 overflow-auto rounded-xl border border-amber-300/10 bg-black/60 p-4 text-xs leading-5 text-zinc-300">${escapeHtml(JSON.stringify(resource.raw, null, 2))}</pre></section>` : "";
-  return htmlResponse(`<!doctype html><html lang="zh-CN">${getPageHead("服务信息", config)}<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"><main class="mx-auto flex min-h-screen w-full max-w-2xl flex-col justify-center gap-4 px-4 py-8"><section class="rounded-3xl border border-amber-300/20 bg-zinc-900/90 p-6 shadow-2xl shadow-black/50 ring-1 ring-white/5"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">Non-Web Service</p><button type="button" class="copy-button mt-2 block max-w-full break-all text-left text-2xl font-bold tracking-tight text-zinc-50 transition hover:text-amber-100 focus:outline-none focus:ring-4 focus:ring-amber-300/10" data-copy="${escapeAttribute(resource.domain)}" data-copy-label="复制域名" title="点击复制域名" aria-label="复制 ${escapeAttribute(resource.domain)}">${escapeHtml(resource.domain)}</button><dl class="mt-6 grid gap-3 text-sm"><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">服务</dt><dd class="font-medium text-zinc-100">${escapeHtml(resource.service)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">协议</dt><dd class="font-medium text-zinc-100">${escapeHtml(resource.protocol)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">目标</dt><dd class="break-all font-medium text-zinc-100">${escapeHtml(resource.target)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">端口</dt><dd><code class="rounded-lg border border-amber-300/15 bg-black/30 px-2 py-1 font-mono text-sm font-semibold text-amber-200">${resource.port}</code></dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">链接</dt><dd class="min-w-0">${linkPart}</dd></div></dl><div class="mt-6 flex flex-wrap gap-2">${buildCopyButton(resource.port, "端口", "复制端口")}${buildCopyButton(resource.hostPort, "Host", "复制 Host Port")}${localLink ? buildCopyButton(localLink, "URL", "复制完整 URL") : ""}${authPart}${buildRdpDownloadLink(resource)}</div></section>${debugInfo}<script>${getCopyScript()}</script></main></body></html>`);
+  return htmlResponse(`<!doctype html><html lang="zh-CN">${getPageHead("服务信息", config)}<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"><main class="mx-auto flex min-h-screen w-full max-w-2xl flex-col justify-center gap-4 px-4 py-8"><section class="rounded-3xl border border-amber-300/20 bg-zinc-900/90 p-6 shadow-2xl shadow-black/50 ring-1 ring-white/5"><p class="text-xs font-semibold uppercase tracking-wider text-amber-300">Non-Web Service</p><button type="button" class="copy-button mt-2 block max-w-full break-all text-left text-2xl font-bold tracking-tight text-zinc-50 transition hover:text-amber-100 focus:outline-none focus:ring-4 focus:ring-amber-300/10" data-copy="${escapeAttribute(resource.domain)}" data-copy-label="复制域名" title="点击复制域名" aria-label="复制 ${escapeAttribute(resource.domain)}">${escapeHtml(resource.domain)}</button><dl class="mt-6 grid gap-3 text-sm"><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">服务</dt><dd class="font-medium text-zinc-100">${escapeHtml(resource.service)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">协议</dt><dd class="font-medium text-zinc-100">${escapeHtml(resource.protocol)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">目标</dt><dd class="break-all font-medium text-zinc-100">${escapeHtml(resource.target)}</dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">端口</dt><dd><code class="rounded-lg border border-amber-300/15 bg-black/30 px-2 py-1 font-mono text-sm font-semibold text-amber-200">${resource.port}</code></dd></div><div class="grid grid-cols-[4rem_minmax(0,1fr)] gap-3"><dt class="text-zinc-500">链接</dt><dd class="min-w-0">${linkPart}</dd></div></dl><div class="mt-6 flex flex-wrap gap-2">${buildCopyButton(resource.port, "端口", "复制端口")}${buildCopyButton(resource.hostPort, "Host", "复制 Host Port")}${localLink ? buildCopyButton(localLink, "URL", "复制完整 URL") : ""}${authPart}${buildRdpDownloadLink(resource)}</div></section>${debugInfo}<script>${getCopyScript()}</script><script>${getRdpScript()}</script></main></body></html>`);
 }
 
 function getWebServiceRedirect(record, config) {
   const { isWeb, scheme } = determineIfWebService(record.service, record.protocol);
   if (!isWeb) return { canRedirect: false, isWeb: false, scheme, target: record.target };
-  return { canRedirect: true, isWeb: true, scheme, target: record.target };
+  return { canRedirect: true, isWeb: true, scheme, target: resolvePrefixedTarget(record.hostname, record.target, config) };
 }
 
 function getVlessFallbackRedirect(record, config) {
