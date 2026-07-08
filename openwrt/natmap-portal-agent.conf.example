@@ -11,3 +11,7 @@ NATMAP_REFRESH_QUEUE_NAME='_natmap-refresh.s.example.com'
 # NATMAP_CLEANUP_DISABLED=1
 # NATMAP_CLEANUP_INTERVAL=300
 # NATMAP_DNS_RECONCILE_INTERVAL=300
+# Optional: pre-authorize this router's public IP before each health round.
+# The token is sensitive. Keep the real value only on OpenWrt, not in git.
+# ACCESS_AUTH_SELF_CHECK_TOKEN='change-me'
+# ACCESS_AUTH_SELF_CHECK_TTL=120

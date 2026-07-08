@@ -81,6 +81,19 @@ For HTTP/HTTPS the target hostname is read from natmap section data in this orde
 
 This keeps Host/SNI correct while still connecting to the natmap public IP and port. For `vless_fb`, the agent derives the fallback hostname the same way as the Worker redirect path when the SRV target is a parent-domain service host.
 
+## Access Authorization Preflight
+
+Some deployments protect every natmap public port behind a same-port HTTPS authorization gate. When `ACCESS_AUTH_SELF_CHECK_TOKEN` is configured on OpenWrt, the agent performs one token login before each health round:
+
+```text
+POST https://<health-host>:<public-port>/api/login
+Host/SNI: <health-host>
+connect address: <public-ip>:<public-port>
+body: {"auth_method":"token","token":"...","proto":"tcp","listen_port":"<public-port>","ttl_minutes":N}
+```
+
+The first enabled TCP section with runtime status supplies the public IP, public port, and hostname. A successful login authorizes the router's public IP for protected inbound checks. If the source IP is already authorized, the same URL may be passed through to the backend service and return another HTTP status such as `307`; the agent logs that as a completed but unconfirmed preflight. The preflight is deliberately best-effort: confirmed success, completed HTTP responses, and connection failures are all logged, but the return value is always non-fatal so DNS reconciliation, custom probes, default probes, failure counters, and restart behavior keep their original semantics.
+
 ## DNS SRV Reconciliation
 
 During health checks, the agent also queries the section's SRV name through `nslookup`. If DNS still advertises an old port while natmap runtime status has a newer public port, the agent calls that section's configured DDNS script with the current runtime IP and port. Attempts are rate-limited by `/tmp/natmap-portal-agent/*.reconcile` and `NATMAP_DNS_RECONCILE_INTERVAL`; this repairs stale DNS without restarting the natmap section.

@@ -11,6 +11,9 @@ REFRESH_INTERVAL=${NATMAP_REFRESH_INTERVAL:-30}
 HEALTH_INTERVAL=${NATMAP_HEALTH_INTERVAL:-300}
 FAIL_THRESHOLD=${NATMAP_HEALTH_FAIL_THRESHOLD:-2}
 TIMEOUT=${NATMAP_HEALTH_TIMEOUT:-4}
+ACCESS_AUTH_SELF_CHECK_TOKEN=${ACCESS_AUTH_SELF_CHECK_TOKEN:-}
+ACCESS_AUTH_SELF_CHECK_TTL=${ACCESS_AUTH_SELF_CHECK_TTL:-120}
+ACCESS_AUTH_SELF_CHECK_DONE=0
 MAX_AGE_MS=${NATMAP_REFRESH_MAX_AGE_MS:-900000}
 REFRESH_RETRY_LIMIT=${NATMAP_REFRESH_RETRY_LIMIT:-3}
 REFRESH_RESTART_WAIT_SECONDS=${NATMAP_REFRESH_RESTART_WAIT_SECONDS:-10}
@@ -227,6 +230,42 @@ vless_fallback_probe() {
 	http_probe_host https "$(vless_fallback_target)"
 }
 
+access_auth_self_check_host() {
+	local host
+	host="${ddns_https_target:-}"
+	[ -n "$host" ] && [ "$host" != "." ] || host="${ddns_srv_target:-}"
+	[ -n "$host" ] && [ "$host" != "." ] || host="${ddns_srv:-}"
+	[ -n "$host" ] && [ "$host" != "." ] || return 1
+	printf %s "$host"
+}
+
+access_auth_self_check_login() {
+	local host ttl ttl_minutes body code out
+	[ -n "$ACCESS_AUTH_SELF_CHECK_TOKEN" ] || return 0
+	[ "$ACCESS_AUTH_SELF_CHECK_DONE" = 1 ] && return 0
+	[ "$status_proto" = tcp ] || return 0
+	[ -n "$public_ip" ] && [ -n "$public_port" ] || return 0
+	host="$(access_auth_self_check_host)" || return 0
+	ACCESS_AUTH_SELF_CHECK_DONE=1
+	ttl="$ACCESS_AUTH_SELF_CHECK_TTL"
+	case "$ttl" in ""|*[!0-9]*) ttl=120 ;; esac
+	[ "$ttl" -ge 60 ] 2>/dev/null || ttl=60
+	ttl_minutes=$(( (ttl + 59) / 60 ))
+	body="$(printf '{"auth_method":"token","token":"%s","proto":"tcp","listen_port":"%s","ttl_minutes":%s}' "$ACCESS_AUTH_SELF_CHECK_TOKEN" "$public_port" "$ttl_minutes")"
+	out="$STATE_DIR/access-auth-login.$$"
+	code="$(curl -k -sS -o "$out" -w '%{http_code}' --connect-timeout "$TIMEOUT" --max-time "$TIMEOUT" --resolve "${host}:${public_port}:${public_ip}" -H 'Content-Type: application/json' --data "$body" "https://${host}:${public_port}/api/login" 2>/dev/null || true)"
+	if [ "$code" = 200 ] && grep -q '"credential_id":"default"' "$out" 2>/dev/null; then
+		ACCESS_AUTH_SELF_CHECK_DONE=1
+		log "access-auth self-check token preauth ok via ${host}:${public_port} ttl=${ttl}s"
+	elif echo "$code" | grep -q '^[1-5][0-9][0-9]$'; then
+		log "access-auth self-check token preauth completed via ${host}:${public_port} http=${code} ttl=${ttl}s"
+	else
+		log "access-auth self-check token preauth failed via ${host}:${public_port} http=${code:-none}"
+	fi
+	rm -f "$out"
+	return 0
+}
+
 rdp_probe() {
 	# RDP does not send a plaintext banner. Fall back to a TCP connect check unless a custom probe exists.
 	tcp_connect_probe
@@ -385,10 +424,12 @@ check_section() {
 	inner_port="$(jsonfilter -q -i "$status_file" -e @.inner_port 2>/dev/null)"
 	[ -n "$public_ip" ] && [ -n "$public_port" ] || { record_failure "$section" bad-status; return 0; }
 	reconcile_dns_srv
+	access_auth_self_check_login
 	if probe_section; then record_success "$section"; else record_failure "$section" "${public_ip}:${public_port}/${status_proto}"; fi
 }
 
 process_health_once() {
+	ACCESS_AUTH_SELF_CHECK_DONE=0
 	config_load natmap
 	config_foreach check_section natmap
 }

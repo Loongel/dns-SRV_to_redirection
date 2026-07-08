@@ -4,6 +4,8 @@
 
 ### Changed
 
+- OpenWrt health rounds can optionally pre-authorize the router public IP through `ACCESS_AUTH_SELF_CHECK_TOKEN`; the request is logged but never gates the existing health logic.
+- OpenWrt installer now merges provided agent config keys instead of replacing the whole config file, preserving existing local secrets.
 - OpenWrt agent repairs stale DNS SRV ports from natmap runtime state during health checks, rate-limited by `NATMAP_DNS_RECONCILE_INTERVAL`.
 - OpenWrt health checks write failure counters atomically and probe `_vless_fb` services through their HTTPS fallback hostname.
 - Cloudflare DDNS calls now use a total request timeout so failed API connectivity cannot block indefinitely.

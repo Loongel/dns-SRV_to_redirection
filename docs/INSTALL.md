@@ -102,6 +102,28 @@ OpenWrt natmap converts that to `-b 60111~60120`, which means random allocation 
 
 When a section is disabled, the portal agent can automatically remove its stale SRV/HTTPS records from Cloudflare as long as `ddns_script`, real `ddns_tokens`, and the corresponding `ddns_srv` or `ddns_https` values remain in UCI. Placeholder tokens such as `<api_token>` are skipped. It intentionally does not remove shared A/AAAA records.
 
+## Protected Port Authorization
+
+If your natmap ports require a same-port HTTPS authorization before traffic is allowed, configure a token on OpenWrt:
+
+```sh
+cat >>/etc/natmap/natmap-portal-agent.conf <<'SH'
+ACCESS_AUTH_SELF_CHECK_TOKEN='replace-with-your-token'
+ACCESS_AUTH_SELF_CHECK_TTL=120
+SH
+```
+
+During each health round the agent will try one token login through an enabled TCP tunnel before running probes. This request is best-effort: it writes an `access-auth self-check ...` log line, but success or failure does not change DNS repair, health probe, failure counter, or restart behavior.
+
+The installer can also merge these values without deleting other config keys:
+
+```sh
+OPENWRT_HOST=wrt \
+OPENWRT_ACCESS_AUTH_SELF_CHECK_TOKEN='replace-with-your-token' \
+OPENWRT_ACCESS_AUTH_SELF_CHECK_TTL=120 \
+scripts/install-openwrt.sh
+```
+
 ## Health Probe Overrides
 
 Place executable scripts in `/etc/natmap/health.d/<ddns_srv>` to override default health behavior for a service. `_vless_fb` has a built-in HTTPS fallback probe; plain VLESS and other unknown TCP services default to TCP connect unless you provide a custom probe.

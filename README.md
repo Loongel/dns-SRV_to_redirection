@@ -106,12 +106,15 @@ The agent works with defaults, but these can be exported before running it:
 | `NATMAP_CLEANUP_DISABLED` | `1` | Delete SRV/HTTPS DNS records for disabled natmap sections that still carry DDNS config. |
 | `NATMAP_CLEANUP_INTERVAL` | `300` | Disabled-section cleanup interval in seconds. |
 | `NATMAP_DNS_RECONCILE_INTERVAL` | `300` | Minimum seconds between DDNS repair attempts when DNS SRV still points at an old port. |
+| `ACCESS_AUTH_SELF_CHECK_TOKEN` | empty | Optional token used by the health agent to pre-authorize the router's public IP before probing protected TCP tunnels. |
+| `ACCESS_AUTH_SELF_CHECK_TTL` | `120` | Requested pre-authorization lifetime in seconds. Values below 60 are raised to 60. |
 | `NATMAP_PORTAL_VERBOSE` | `0` | Print logs to stdout as well as `logger`. |
 
 ## Safety Notes
 
 - OpenWrt refresh polling reads TXT through system DNS (`nslookup`); it does not use Cloudflare API tokens.
 - Disabled natmap cleanup and stale SRV repair use the section's own DDNS script and tokens; the agent itself still reads refresh/DNS state through system DNS tools.
+- If `ACCESS_AUTH_SELF_CHECK_TOKEN` is configured, each health round attempts one HTTPS token login through an enabled TCP tunnel before probes. Success or failure is logged only and never changes the original health logic.
 - Worker force-refresh and manual refresh APIs require the portal password and have in-memory rate limits.
 - Manual browser refresh after clicking "refresh port" does not repeat the action; POST fallback uses `303 See Other`.
 - `_vless_fb` is probed as HTTPS fallback using the derived fallback hostname, while plain VLESS still defaults to TCP connect. UDP services are not generically probeable; add service-specific scripts under `/etc/natmap/health.d/` for HY2, QUIC, game protocols, and similar services.
